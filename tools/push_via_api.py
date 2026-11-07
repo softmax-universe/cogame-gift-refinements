@@ -12,7 +12,7 @@ admin on it. This walks the exact tree of a local commit up to the API:
   4. one commit whose message and author are the local commit's;
   5. the ref is fast-forwarded to it.
 
-    python3 tools/push_via_api.py Metta-AI/cogame-<slug> main "<commit message>"
+    python3 tools/push_via_api.py softmax-universe/cogame-<slug> main "<commit message>"
 
 No token is ever read, printed or written by this script: every call is made
 through `gh api`, which holds its own.
