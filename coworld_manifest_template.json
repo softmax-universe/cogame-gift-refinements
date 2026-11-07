@@ -19,7 +19,7 @@
       "image": "{{GIFT_REFINEMENTS_IMAGE}}",
       "run": ["/bin/gift-refinements"],
       "env": {},
-      "source_url": "https://github.com/Metta-AI/cogame-gift-refinements/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-gift-refinements/tree/main"
     },
     "replay_viewer": {
       "bundle": "static-replay-viewer"
@@ -144,7 +144,7 @@
       "name": "Gift Refinements policy seat",
       "description": "A prompt policy. PLAYER_PROMPT is supplied at upload time; with none set the seat plays the reciprocator baseline.",
       "image": "{{GIFT_REFINEMENTS_IMAGE}}",
-      "source_url": "https://github.com/Metta-AI/cogame-gift-refinements/tree/main",
+      "source_url": "https://github.com/softmax-universe/cogame-gift-refinements/tree/main",
       "run": ["/bin/gift-refinements-player"]
     },
     {
@@ -153,7 +153,7 @@
       "name": "Reciprocator baseline",
       "description": "The always-return bot: finds the cog most in credit with it and beams back what it was sent, plus one.",
       "image": "{{GIFT_REFINEMENTS_IMAGE}}",
-      "source_url": "https://github.com/Metta-AI/cogame-gift-refinements/tree/main",
+      "source_url": "https://github.com/softmax-universe/cogame-gift-refinements/tree/main",
       "run": ["/bin/gift-refinements-player"],
       "env": {"PLAYER_SCRIPTED": "reciprocator"}
     },
@@ -163,7 +163,7 @@
       "name": "Hoarder baseline",
       "description": "The never-gift bot: collects, banks, and walks away from everyone.",
       "image": "{{GIFT_REFINEMENTS_IMAGE}}",
-      "source_url": "https://github.com/Metta-AI/cogame-gift-refinements/tree/main",
+      "source_url": "https://github.com/softmax-universe/cogame-gift-refinements/tree/main",
       "run": ["/bin/gift-refinements-player"],
       "env": {"PLAYER_SCRIPTED": "hoarder"}
     }
