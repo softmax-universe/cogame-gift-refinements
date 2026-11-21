@@ -616,13 +616,18 @@ proc scriptedFor*(
 ): Order =
   scriptedOrder(kind, sim.seatView(seat), sim.config.maxBeamsPerRound)
 
+proc holdFallbackOrder*(): Order =
+  ## Neutral hold order for scored LLM failures (never runs `reciprocatorOrder`).
+  Order(job: jobHold, target: -1, gift: 0, consume: cwNever, source: osFallback)
+
 proc repairMissingOrders*(engine: DecisionEngine, sim: var SimServer) =
-  ## No tick is ever left unactuated: a seat with no order at all plays the
-  ## `reciprocator` order rather than standing still.
+  ## Ensure every seat has an order: neutral hold for LLM seats, `reciprocator`
+  ## for unregistered scripted seats.
   for seat in 0 ..< SeatCount:
     if not sim.haveOrder[seat]:
-      var order = reciprocatorOrder(sim.seatView(seat),
-                                    sim.config.maxBeamsPerRound)
+      var order =
+        if engine.seats[seat].isLlm: holdFallbackOrder()
+        else: reciprocatorOrder(sim.seatView(seat), sim.config.maxBeamsPerRound)
       order.source = osFallback
       sim.orders[seat] = order
       sim.haveOrder[seat] = true
@@ -673,15 +678,12 @@ proc turn*(
         not engine.client.disabled:
       open.add(seat)
     elif engine.seats[seat].isLlm:
-      var order = reciprocatorOrder(sim.seatView(seat),
-                                    sim.config.maxBeamsPerRound)
-      order.source = osFallback
-      sim.installOrder(seat, order)
+      sim.installOrder(seat, holdFallbackOrder())
       engine.fallbacks += 1
       let cause = if engine.llmOff: "budget_guard" else: "no_credentials"
       result.add(fallbackRecord(roundIndex, seat, 1, cause,
-        "the LLM is unavailable for this round; playing reciprocator"))
-      echo LogPrefix, "seat ", seat, " falling back to scripted order (",
+        "the LLM is unavailable for this round; holding position"))
+      echo LogPrefix, "seat ", seat, " falling back to neutral hold (",
         cause, ") on round ", roundIndex
     else:
       var order = engine.scriptedFor(sim, seat, engine.seats[seat].baseline)
@@ -844,12 +846,9 @@ proc turn*(
         open.len, " seat(s) fall back for round ", roundIndex
       break
 
-  # --- anything still open plays the reciprocator order for this round ------
+  # --- anything still open holds position (never plays scripted reciprocator)
   for seat in open:
-    var order = reciprocatorOrder(sim.seatView(seat),
-                                  sim.config.maxBeamsPerRound)
-    order.source = osFallback
-    sim.installOrder(seat, order)
+    sim.installOrder(seat, holdFallbackOrder())
     engine.fallbacks += 1
     let cause =
       if engine.client.disabled or engine.client.transport == ltNone:
@@ -858,9 +857,9 @@ proc turn*(
       elif engine.client.throttled: "throttled"
       else: "parse_error"
     result.add(fallbackRecord(roundIndex, seat, 2, cause,
-      "seat fell back to the reciprocator order"))
+      "seat fell back to neutral hold"))
     ## "falling back" is the phrase phase 60 greps the GAME log for.
-    echo LogPrefix, "seat ", seat, " falling back to scripted order (", cause,
+    echo LogPrefix, "seat ", seat, " falling back to neutral hold (", cause,
       ") on round ", roundIndex
 
   engine.repairMissingOrders(sim)
