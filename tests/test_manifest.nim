@@ -231,7 +231,7 @@ block schemaDefaultsMatchTheEngine:
   want("moveCooldown", config.moveCooldown)
   want("consumeCooldown", config.consumeCooldown)
   want("attempt1Ms", config.attempt1Ms)
-  want("retryMs", config.retryMs)
+  check(not props.hasKey("retryMs"), "retry-only deadline knob retryMs must not be in config_schema")
   want("turnBudgetMs", config.turnBudgetMs)
   want("minTurnSeconds", config.minTurnSeconds)
   want("maxOutputTokens", config.maxOutputTokens)

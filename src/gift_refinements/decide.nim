@@ -1,29 +1,26 @@
 ## The decision layer: one batched round of asking six seats what their cog
-## does next, and always having an answer.
+## does next.
 ##
 ## Forked from `coworld-ctf/src/ctf/decide.nim`.
 ##
 ## CADENCE. One turn = one round = 60 ticks. At each round boundary the game
 ## builds ALL SIX seats' request bodies and issues them as ONE PARALLEL BATCH
-## (`curly.makeRequests`) -- never sequentially, never one seat at a time. The
-## single retry is likewise ONE batch, of only the seats that failed, and it is
-## issued only after the first batch has resolved.
+## (`curly.makeRequests`) -- never sequentially, never one seat at a time, and
+## with no hidden corrective retry.
 ##
 ##   per round:   1 batch of 6, attempt1Ms = 20 s
-##                + at most 1 retry batch of the failed seats, retryMs = 12 s
 ##                turnBudgetMs = 34 s caps the whole turn
 ##   worst case:  12 x 34 s = 408 s + sim 0.4 s + connect <= 30 s
 ##                + shutdown 20 s  =  ~459 s  <  720 s (0.6 x 1200)
 ##   typical:     max(minTurnSeconds 25, ~7 s) x 12  ~  300 s
 ##
-## `minTurnSeconds` floors the spacing between BATCH STARTS, so the worst case
-## is 12 requests / 25 s = 28.8 rpm, under the Bedrock sidecar's 30 rpm
-## per-episode ceiling that bit cogame-raid.
+## `minTurnSeconds` floors the spacing between BATCH STARTS, keeping request
+## volume well under the Bedrock sidecar's 30 rpm per-episode ceiling.
 ##
-## DEGRADE, NEVER HANG. `turn` never raises: every failure path ends in a legal
-## order and the episode always advances. No tick is left unactuated -- the
-## kernel always has an order: this round's, else last round's, else
-## `reciprocator`'s.
+## NO FAKE MOVES. `turn` never raises and never substitutes a scripted fallback
+## or hidden retry for a failed/invalid LLM reply: any failed LLM seat is
+## recorded in `engine.roundFailures` with `sim.haveOrder[seat] = false`, and
+## the server terminates the unfinished episode unscored (`reason: "error"`).
 
 import std/[base64, json, math, monotimes, options, os, parsejson, streams, strutils, tables, times]
 
@@ -462,14 +459,11 @@ pillars and other cogs. A beam that finds nobody costs you nothing.
   of pvMixed: raise newException(ValueError, "mixed selection must resolve to a training wording")
   result.add("""THE CLOSE. At the last tick of round """ & $scene.rounds & """, everything you still hold is banked automatically.
 
-HOW YOU PLAY. You do not steer tick by tick. Once per round you choose ONE standing order for
-the next """ & $scene.ticksPerRound & """ ticks and a deterministic kernel walks and beams it for you:
-  job "collect" - walk to the nearest loose raw token and pick it up.
-  job "meet"    - walk to the nearest cell from which `target` is in beam line, and wait there.
-  job "hold"    - stay put. Beams still fire when someone walks into line.
-  job "evade"   - walk as far from every other cog as the board allows.
-  gift N        - fire up to N beams at `target` this round, whenever it is in line.
-  consume       - "now" banks on the round's first tick, "end" on its last, "never" not at all.
+HOW YOU PLAY. Once per round you choose ONE standing order for the next """ & $scene.ticksPerRound & """ ticks:
+  "job"     - movement only: "collect" (nearest loose raw token), "meet" (move into beam line of `target` and wait), "hold" (stay put), or "evade" (move away from all cogs). Never set "job" to "consume".
+  "target"  - another cog's alias or null. Required (non-null) whenever "job" is "meet" or "gift" > 0.
+  "gift"    - integer 0..""" & $scene.maxBeamsPerRound & """: max beams to fire at `target` this round whenever it is in line.
+  "consume" - banking only (separate from "job"): "now" (first tick), "end" (last tick), or "never".
 
 THE OTHER FIVE. """ & others.join(", ") & """ are other policies, deciding at the SAME
 moment you are. NOBODY CAN HEAR ANYTHING YOU SAY - there is no talk channel in this world. The
@@ -550,7 +544,9 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
     "\"gift\":0-" & $view.beamsPerRound & "," &
     "\"consume\":\"now|end|never\"," &
     "\"say\":\"<= " & $MaxSayRunes & " chars, spectators only\"," &
-    "\"notes\":\"<= " & $MaxNotesRunes & " chars, private to you\"}"
+    "\"notes\":\"<= " & $MaxNotesRunes & " chars, private to you\"}\n" &
+    "Rules: \"consume\" is a separate field (never set \"job\" to \"consume\"); " &
+    "\"target\" must be a listed alias (never null) when \"job\" is \"meet\" or \"gift\" > 0."
 
 # ---------------------------------------------------------------------------
 #  Fallback + guard records
@@ -613,12 +609,6 @@ proc registerRecord*(seat: int, policy, kind, baseline: string): string =
 #  The turn
 # ---------------------------------------------------------------------------
 
-proc retryHint*(maxBeams: int): string =
-  "\n\nYour previous reply was invalid. Respond with ONLY the " &
-  "requested JSON object, using one of the listed job values, one of the " &
-  "listed target aliases, a gift count between 0 and " & $maxBeams & ", and one of " &
-  "now/end/never."
-
 proc scriptedFor*(
   engine: DecisionEngine, sim: SimServer, seat: int, kind: Baseline
 ): Order =
@@ -651,8 +641,7 @@ proc turn*(
       observation["scenario_family"] = %scenarioFamily(sim.config)
       engine.decisions[seat] = RoundDecision(observation: observation, status: asMissing)
   ## Throttle state is PER ROUND: a 429 on round k says nothing about round
-  ## k+1 (the sidecar's window may have rolled), so the flag is cleared here
-  ## and only suppresses this round's retry.
+  ## k+1 (the sidecar's window may have rolled), so the flag is cleared here.
   engine.client.throttled = false
 
   # --- budget guard: fail cleanly rather than overrun or fake moves ----------
@@ -700,8 +689,8 @@ proc turn*(
 
   # --- the rate floor -------------------------------------------------------
   # The Bedrock sidecar caps 30 requests/minute PER EPISODE. Holding the START
-  # of consecutive batches `minTurnSeconds` apart pins the worst case (6 + 6
-  # retries) at 28.8 rpm. The cert fixture sets it to 0, so offline runs pay
+  # of consecutive batches `minTurnSeconds` apart keeps request volume well
+  # under that ceiling. The cert fixture sets it to 0, so offline runs pay
   # nothing. It is applied at the TOP of `turn`, which `server.nim` calls before
   # the round's ticks, and it is measured between batch STARTS -- so the ticks
   # of the round just played count against the floor and a round costs
@@ -718,144 +707,128 @@ proc turn*(
 
   let scene = sim.scene()
 
-  # --- up to two PARALLEL batches ------------------------------------------
-  var attempt = 0
+  # --- ONE PARALLEL batch, no hidden corrective retry -----------------------
   var lastFailure: array[SeatCount, EpisodeFailure]
   var hasFailure: array[SeatCount, bool]
-  while open.len > 0 and attempt < 2:
-    if engine.client.disabled:
-      break
+  if open.len > 0 and not engine.client.disabled:
     if getMonoTime() - turnStart >= budget:
       for seat in open:
-        let detail = "per-round budget exhausted before attempt " & $(attempt + 1)
+        let detail = "per-round budget exhausted before attempt 1"
         lastFailure[seat] = EpisodeFailure(
-          round: roundIndex, seat: seat, attempt: attempt + 1,
+          round: roundIndex, seat: seat, attempt: 1,
           cause: "timeout", category: "infrastructure",
           detail: detail.cleanText(MaxFallbackDetailRunes))
         hasFailure[seat] = true
-        result.add(failureRecord(roundIndex, seat, attempt + 1,
-          "timeout", "infrastructure", detail))
-      break
-    let deadlineMs =
-      if attempt == 0: sim.config.attempt1Ms else: sim.config.retryMs
-    var batch: RequestBatch
-    var requests: seq[JsonNode]
-    var prompts: seq[JsonNode]
-    for seat in open:
-      let view = sim.seatView(seat)
-      var user = userPrompt(view, scene, engine.seats[seat].prompt)
-      if attempt > 0:
-        user.add(retryHint(sim.config.maxBeamsPerRound))
-      let request = engine.client.requestFor(systemPrompt(view, scene, engine.selection), user, seat)
-      batch.post(request.url, request.headers, request.body, $seat)
-      if engine.captureEnabled:
-        requests.add(parseJson(request.body))
-        prompts.add(%*[{"role": "system", "content": systemPrompt(view, scene, engine.selection)},
-          {"role": "user", "content": user}])
-    let started = getMonoTime()
-    # curly hands the deadline to CURLOPT_TIMEOUT, whose granularity is WHOLE
-    # SECONDS, so this conversion FLOORS. sim_config REJECTS a sub-second
-    # value, so the floor below is an identity: 20000 -> 20 s, 12000 -> 12 s,
-    # worst case 32 s inside the 34 s turnBudgetMs cap.
-    let responses = engine.client.curl.makeRequests(
-      batch, max(1, deadlineMs div 1000))
-    let latency = (getMonoTime() - started).inMilliseconds.int
-    var stillOpen: seq[int] = @[]
-    for position, seat in open:
-      var evidence: DecisionAttempt
-      if engine.captureEnabled:
-        evidence = newDecisionAttempt($roundIndex & "-" & $seat & "-" & $(attempt + 1),
-          engine.seats[seat].label, aoModel)
-        evidence.model = some(engine.client.model)
-        evidence.prompt = prompts[position]
-        evidence.request = requests[position]
-        evidence.decoder = %*{"max_tokens": evidence.request["max_tokens"]}
-        for key in ["temperature", "top_p", "top_k", "output_config", "max_completion_tokens",
-            "seed", "stop", "stop_sequences", "stop_regex", "no_stop_trim", "tool_choice", "tools",
-            "thinking", "reasoning", "response_format"]:
-          if evidence.request.hasKey(key): evidence.decoder[key] = evidence.request[key]
-        evidence.latencyMs = some(float(latency))
-        let response = responses[position].response
-        if response.code >= 100 and response.code <= 599:
-          evidence.httpStatus = some(response.code)
-        if scalarUtf8(response.body): evidence.rawResponse = %response.body
-        evidence.responseBodyB64 = some(encode(response.body))
-        var headers = initTable[string, string]()
-        for (key, value) in response.headers: headers[key] = value
-        evidence.responseHeaders = some(headers)
-        if response.headers.contains("X-Softmax-Llm-Call-Id"):
-          evidence.platformCallId = some(response.headers["X-Softmax-Llm-Call-Id"])
-        for header in ["request-id", "x-request-id"]:
-          if response.headers.contains(header):
-            evidence.providerRequestId = some(response.headers[header])
-            break
-        # A failed transport has no complete response; never turn it into a zero-call success.
-        evidence.responseComplete = some(responses[position].error.len == 0)
-        evidence.responseReaderJoined = some(true) # synchronous makeRequests has returned
-      try:
-        let text = engine.client.textOf(
-          responses[position].response, responses[position].error,
-          batch[position].url)
+    else:
+      let deadlineMs = sim.config.attempt1Ms
+      var batch: RequestBatch
+      var requests: seq[JsonNode]
+      var prompts: seq[JsonNode]
+      for seat in open:
+        let view = sim.seatView(seat)
+        let system = systemPrompt(view, scene, engine.selection)
+        let user = userPrompt(view, scene, engine.seats[seat].prompt)
+        let request = engine.client.requestFor(system, user, seat)
+        batch.post(request.url, request.headers, request.body, $seat)
         if engine.captureEnabled:
-          if scalarUtf8(text): evidence.response = %text
-          let payload = parseJson(responses[position].response.body)
-          let reportedModel = payload{"model"}
-          let stopReason = payload{"stop_reason"}
-          let inputTokens = payload{"usage", "input_tokens"}
-          let outputTokens = payload{"usage", "output_tokens"}
-          if reportedModel != nil and reportedModel.kind == JString:
-            evidence.model = some(reportedModel.getStr())
-          if stopReason != nil and stopReason.kind == JString:
-            evidence.stopReason = some(stopReason.getStr())
-          if inputTokens != nil and inputTokens.kind == JInt and inputTokens.getInt() >= 0:
-            evidence.inputTokens = some(inputTokens.getInt())
-          if outputTokens != nil and outputTokens.kind == JInt and outputTokens.getInt() >= 0:
-            evidence.outputTokens = some(outputTokens.getInt())
-        let generated = extractJsonObject(text)
-        var order = parseOrder(
-          generated, seat, scene.names,
-          sim.config.maxBeamsPerRound)
-        order.source = if attempt == 0: osLlm else: osRetry
-        order.latencyMs = latency
-        sim.installOrder(seat, order)
+          requests.add(parseJson(request.body))
+          prompts.add(%*[{"role": "system", "content": system},
+            {"role": "user", "content": user}])
+      let started = getMonoTime()
+      # curly hands the deadline to CURLOPT_TIMEOUT, whose granularity is WHOLE
+      # SECONDS, so this conversion FLOORS. sim_config REJECTS a sub-second
+      # value, so the floor below is an identity: 20000 -> 20 s, inside the
+      # 34 s turnBudgetMs cap.
+      let responses = engine.client.curl.makeRequests(
+        batch, max(1, deadlineMs div 1000))
+      let latency = (getMonoTime() - started).inMilliseconds.int
+      var stillOpen: seq[int] = @[]
+      for position, seat in open:
+        var evidence: DecisionAttempt
         if engine.captureEnabled:
-          evidence.parsedAction = order.orderJson(scene.names)
-          var strict = false
-          try: strict = scalarJson(generated) and strictNativeObject(text) == generated
-          except CatchableError: discard
-          evidence.accepted = strict and suppliedFieldsEqual(generated, evidence.parsedAction)
-          if evidence.accepted:
-            engine.decisions[seat].selectedAttemptId = some(evidence.attemptId)
-            engine.decisions[seat].status = asAccepted
-          else:
-            # Capture admission only: native parsing and the installed order remain unchanged.
-            evidence.rejectionReason = some(if not scalarJson(generated):
-              "non-Unicode supplied JSON key/value; target excluded"
-              elif not strict: "strict JSON grammar/depth differs from native parsed object; target excluded"
-              else: "native parser changed a supplied JSON field/type/value")
-            engine.decisions[seat].status = asRejected
-        engine.llmOrders += 1
-      except CatchableError as error:
-        let classified = classifyDecisionError(error, responses[position].error)
-        lastFailure[seat] = EpisodeFailure(
-          round: roundIndex, seat: seat, attempt: attempt + 1,
-          cause: classified.cause, category: classified.category,
-          detail: error.msg.cleanText(MaxFallbackDetailRunes))
-        hasFailure[seat] = true
-        result.add(failureRecord(roundIndex, seat, attempt + 1,
-          classified.cause, classified.category, error.msg))
-        echo LogPrefix, "seat ", seat, " attempt ", attempt + 1,
-          " failed (", classified.category, "/", classified.cause, "): ", error.msg
-        if engine.captureEnabled:
-          evidence.rejectionReason = some(safeDiagnostic(error.msg))
-        stillOpen.add(seat)
-      if engine.captureEnabled: engine.decisions[seat].attempts.add(evidence)
-    open = stillOpen
-    inc attempt
-    if engine.client.throttled and open.len > 0:
-      echo LogPrefix, "provider throttled with no other candidate; ",
-        open.len, " seat(s) failed on round ", roundIndex
-      break
+          evidence = newDecisionAttempt($roundIndex & "-" & $seat & "-1",
+            engine.seats[seat].label, aoModel)
+          evidence.model = some(engine.client.model)
+          evidence.prompt = prompts[position]
+          evidence.request = requests[position]
+          evidence.decoder = %*{"max_tokens": evidence.request["max_tokens"]}
+          for key in ["temperature", "top_p", "top_k", "output_config", "max_completion_tokens",
+              "seed", "stop", "stop_sequences", "stop_regex", "no_stop_trim", "tool_choice", "tools",
+              "thinking", "reasoning", "response_format"]:
+            if evidence.request.hasKey(key): evidence.decoder[key] = evidence.request[key]
+          evidence.latencyMs = some(float(latency))
+          let response = responses[position].response
+          if response.code >= 100 and response.code <= 599:
+            evidence.httpStatus = some(response.code)
+          if scalarUtf8(response.body): evidence.rawResponse = %response.body
+          evidence.responseBodyB64 = some(encode(response.body))
+          var headers = initTable[string, string]()
+          for (key, value) in response.headers: headers[key] = value
+          evidence.responseHeaders = some(headers)
+          if response.headers.contains("X-Softmax-Llm-Call-Id"):
+            evidence.platformCallId = some(response.headers["X-Softmax-Llm-Call-Id"])
+          for header in ["request-id", "x-request-id"]:
+            if response.headers.contains(header):
+              evidence.providerRequestId = some(response.headers[header])
+              break
+          # A failed transport has no complete response; never turn it into a zero-call success.
+          evidence.responseComplete = some(responses[position].error.len == 0)
+          evidence.responseReaderJoined = some(true) # synchronous makeRequests has returned
+        try:
+          let text = engine.client.textOf(
+            responses[position].response, responses[position].error,
+            batch[position].url)
+          if engine.captureEnabled:
+            if scalarUtf8(text): evidence.response = %text
+            let payload = parseJson(responses[position].response.body)
+            let reportedModel = payload{"model"}
+            let stopReason = payload{"stop_reason"}
+            let inputTokens = payload{"usage", "input_tokens"}
+            let outputTokens = payload{"usage", "output_tokens"}
+            if reportedModel != nil and reportedModel.kind == JString:
+              evidence.model = some(reportedModel.getStr())
+            if stopReason != nil and stopReason.kind == JString:
+              evidence.stopReason = some(stopReason.getStr())
+            if inputTokens != nil and inputTokens.kind == JInt and inputTokens.getInt() >= 0:
+              evidence.inputTokens = some(inputTokens.getInt())
+            if outputTokens != nil and outputTokens.kind == JInt and outputTokens.getInt() >= 0:
+              evidence.outputTokens = some(outputTokens.getInt())
+          let generated = extractJsonObject(text)
+          var order = parseOrder(
+            generated, seat, scene.names,
+            sim.config.maxBeamsPerRound)
+          order.source = osLlm
+          order.latencyMs = latency
+          sim.installOrder(seat, order)
+          if engine.captureEnabled:
+            evidence.parsedAction = order.orderJson(scene.names)
+            var strict = false
+            try: strict = scalarJson(generated) and strictNativeObject(text) == generated
+            except CatchableError: discard
+            evidence.accepted = strict and suppliedFieldsEqual(generated, evidence.parsedAction)
+            if evidence.accepted:
+              engine.decisions[seat].selectedAttemptId = some(evidence.attemptId)
+              engine.decisions[seat].status = asAccepted
+            else:
+              # Capture admission only: native parsing and the installed order remain unchanged.
+              evidence.rejectionReason = some(if not scalarJson(generated):
+                "non-Unicode supplied JSON key/value; target excluded"
+                elif not strict: "strict JSON grammar/depth differs from native parsed object; target excluded"
+                else: "native parser changed a supplied JSON field/type/value")
+              engine.decisions[seat].status = asRejected
+          engine.llmOrders += 1
+        except CatchableError as error:
+          let classified = classifyDecisionError(error, responses[position].error)
+          lastFailure[seat] = EpisodeFailure(
+            round: roundIndex, seat: seat, attempt: 1,
+            cause: classified.cause, category: classified.category,
+            detail: error.msg.cleanText(MaxFallbackDetailRunes))
+          hasFailure[seat] = true
+          if engine.captureEnabled:
+            evidence.rejectionReason = some(safeDiagnostic(error.msg))
+          stillOpen.add(seat)
+        if engine.captureEnabled: engine.decisions[seat].attempts.add(evidence)
+      open = stillOpen
 
   # --- any seat still open has no valid decision: fail cleanly, no fake moves
   for seat in open:
@@ -872,7 +845,7 @@ proc turn*(
           elif engine.client.throttled: "throttled"
           else: "provider_error"
         EpisodeFailure(
-          round: roundIndex, seat: seat, attempt: max(1, attempt),
+          round: roundIndex, seat: seat, attempt: 1,
           cause: cause, category: "infrastructure",
           detail: "LLM decision unavailable")
     engine.roundFailures.add(failure)

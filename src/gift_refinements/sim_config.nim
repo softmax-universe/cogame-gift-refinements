@@ -7,8 +7,8 @@
 ##     CURLOPT_TIMEOUT, whose granularity is WHOLE SECONDS, so a sub-second
 ##     value FLOORS and is not the deadline it claims to be (paintball,
 ##     2026-08-25: a 4500 ms config really ran with 4 s).
-##   * `attempt1Ms + retryMs <= turnBudgetMs` is asserted, so the two attempts
-##     can always both fit inside the per-turn wall-clock cap.
+##   * `attempt1Ms <= turnBudgetMs` is asserted, so the turn's single batch
+##     attempt always fits inside the per-turn wall-clock cap.
 
 import std/[json, strutils]
 
@@ -39,7 +39,6 @@ type
     moveCooldown*: int
     consumeCooldown*: int
     attempt1Ms*: int
-    retryMs*: int
     turnBudgetMs*: int
     minTurnSeconds*: int
     maxOutputTokens*: int
@@ -70,7 +69,6 @@ proc defaultGameConfig*(): GameConfig =
     moveCooldown: DefaultMoveCooldown,
     consumeCooldown: DefaultConsumeCooldown,
     attempt1Ms: DefaultAttempt1Ms,
-    retryMs: DefaultRetryMs,
     turnBudgetMs: DefaultTurnBudgetMs,
     minTurnSeconds: DefaultMinTurnSeconds,
     maxOutputTokens: DefaultMaxOutputTokens,
@@ -132,14 +130,14 @@ proc validate*(config: GameConfig) =
   if config.maxOutputTokens < 200 or config.maxOutputTokens > 2000:
     raise newException(GiftError, "maxOutputTokens must be 200..2000")
   # --- the two LLM-deadline guards, kept from the starter -------------------
-  if config.attempt1Ms mod 1000 != 0 or config.retryMs mod 1000 != 0:
+  if config.attempt1Ms mod 1000 != 0:
     raise newException(GiftError,
-      "attempt1Ms and retryMs must be WHOLE SECONDS: curly floors " &
-      "CURLOPT_TIMEOUT to seconds, so " & $config.attempt1Ms & "/" &
-      $config.retryMs & " would not be the deadline it claims to be")
-  if config.attempt1Ms + config.retryMs > config.turnBudgetMs:
+      "attempt1Ms must be WHOLE SECONDS: curly floors " &
+      "CURLOPT_TIMEOUT to seconds, so " & $config.attempt1Ms &
+      " would not be the deadline it claims to be")
+  if config.attempt1Ms > config.turnBudgetMs:
     raise newException(GiftError,
-      "attempt1Ms + retryMs (" & $(config.attempt1Ms + config.retryMs) &
+      "attempt1Ms (" & $config.attempt1Ms &
       ") must fit inside turnBudgetMs (" & $config.turnBudgetMs & ")")
 
 proc update*(config: var GameConfig, configJson: string) =
@@ -174,7 +172,6 @@ proc update*(config: var GameConfig, configJson: string) =
   config.moveCooldown = node.readInt("moveCooldown", config.moveCooldown)
   config.consumeCooldown = node.readInt("consumeCooldown", config.consumeCooldown)
   config.attempt1Ms = node.readInt("attempt1Ms", config.attempt1Ms)
-  config.retryMs = node.readInt("retryMs", config.retryMs)
   config.turnBudgetMs = node.readInt("turnBudgetMs", config.turnBudgetMs)
   config.minTurnSeconds = node.readInt("minTurnSeconds", config.minTurnSeconds)
   config.maxOutputTokens = node.readInt("maxOutputTokens", config.maxOutputTokens)

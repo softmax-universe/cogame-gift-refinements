@@ -65,9 +65,7 @@ for round in 1 .. config.rounds:
     let system = systemPrompt(game.seatView(seat), game.scene(), selection)
     var selected: JsonNode
     for attempt in row["attempts"]:
-      var user = userPrompt(game.seatView(seat), game.scene(), args[3])
-      if attempt["attempt_id"].getStr().endsWith("-2"):
-        user.add(retryHint(config.maxBeamsPerRound))
+      let user = userPrompt(game.seatView(seat), game.scene(), args[3])
       doAssert attempt["request"]["system"].getStr() == system
       doAssert attempt["request"]["messages"] == %*[{"role": "user", "content": user}]
       doAssert attempt["request"]["max_tokens"].getInt() == config.maxOutputTokens
@@ -80,7 +78,7 @@ for round in 1 .. config.rounds:
     if selected != nil:
       order = parseOrder(extractJsonObject(selected["response"].getStr()), seat,
         game.aliases, config.maxBeamsPerRound)
-      order.source = if selected["attempt_id"].getStr().endsWith("-2"): osRetry else: osLlm
+      order.source = osLlm
     else:
       order = scriptedOrder(blReciprocator, game.seatView(seat), config.maxBeamsPerRound)
     doAssert order.orderJson(game.aliases) == row["executed_action"]

@@ -103,7 +103,6 @@
         "moveCooldown": {"type": "integer", "minimum": 1, "maximum": 8, "default": 2},
         "consumeCooldown": {"type": "integer", "minimum": 1, "maximum": 60, "default": 10},
         "attempt1Ms": {"type": "integer", "minimum": 5000, "maximum": 60000, "default": 20000},
-        "retryMs": {"type": "integer", "minimum": 1000, "maximum": 60000, "default": 12000},
         "turnBudgetMs": {"type": "integer", "minimum": 6000, "maximum": 120000, "default": 34000},
         "minTurnSeconds": {"type": "integer", "minimum": 0, "maximum": 60, "default": 25},
         "maxOutputTokens": {"type": "integer", "minimum": 200, "maximum": 2000, "default": 1000},
