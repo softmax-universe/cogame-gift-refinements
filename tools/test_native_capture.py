@@ -19,10 +19,12 @@ from uuid import UUID
 
 FAILURE_MODES = {
     "throttle",
+    "provider_503",
     "normalized",
     "clamped",
     "unknown",
     "ambiguous",
+    "competing_fences",
     "consume_job",
     "meet_no_target",
 }
@@ -183,9 +185,30 @@ def run_case(
             text = json.dumps(order, separators=(",", ":"))
             if mode == "fenced":
                 text = "```json\n" + text + "\n```"
+            if mode == "commentary_fenced":
+                text = (
+                    "I need to analyze this strategically.\n\n"
+                    "**Current situation:**\n"
+                    '- Considered {"job":"hold"} first, but collecting raw tokens is stronger.\n\n'
+                    "```json\n" + text + "\n```"
+                )
             if mode == "ambiguous":
                 text = text + " " + text
-            status = 429 if mode == "throttle" else 200
+            if mode == "competing_fences":
+                text = (
+                    "Option A:\n```json\n"
+                    + text
+                    + "\n```\nOption B:\n```json\n"
+                    + json.dumps({"job": "hold"}, separators=(",", ":"))
+                    + "\n```"
+                )
+            status = (
+                429
+                if mode == "throttle"
+                else 503
+                if mode == "provider_503"
+                else 200
+            )
             body = json.dumps(
                 {
                     "model": "local/capture-sentinel",
@@ -410,19 +433,27 @@ def run_case(
         assert 1 <= len(player_failure["message"]) <= 2000
         assert player_failure["failed_policy_index"] == 0
         expected_kind = (
-            "episode_inconclusive" if mode == "throttle" else "player_error"
+            "episode_inconclusive"
+            if mode in ("throttle", "provider_503")
+            else "player_error"
         )
         assert player_failure["kind"] == expected_kind
         results = replay["results"]
         assert results["reason"] == "error" and results["ending"] == "error"
         assert results["scored"] is False
         assert "scores" not in results and "win" not in results
-        expected_cat = "infrastructure" if mode == "throttle" else "invalid_action"
+        expected_cat = (
+            "infrastructure"
+            if mode in ("throttle", "provider_503")
+            else "invalid_action"
+        )
         expected_cause = (
             "throttled"
             if mode == "throttle"
+            else "provider_error"
+            if mode == "provider_503"
             else "parse_error"
-            if mode == "ambiguous"
+            if mode in ("ambiguous", "competing_fences")
             else "invalid_action"
         )
         assert results["failure_category"] == expected_cat
@@ -452,7 +483,7 @@ def run_case(
         assert seat0["selected_attempt_id"] is None
         assert seat0["fallback_origin"] is None
         assert seat0["action_status"] == (
-            "missing" if mode == "throttle" else "rejected"
+            "missing" if mode in ("throttle", "provider_503") else "rejected"
         )
         assert len(seat0["attempts"]) == expected_calls
         for attempt in seat0["attempts"]:
@@ -736,12 +767,15 @@ def main():
             ("success", "refinery"),
             ("native_default", "refinery"),
             ("fenced", "open-floor"),
+            ("commentary_fenced", "refinery"),
             ("defaulted", "refinery"),
             ("normalized", "refinery"),
             ("ambiguous", "refinery"),
+            ("competing_fences", "refinery"),
             ("consume_job", "refinery"),
             ("meet_no_target", "refinery"),
             ("throttle", "refinery"),
+            ("provider_503", "refinery"),
             ("clamped", "refinery"),
             ("truncated", "refinery"),
             ("unknown", "refinery"),

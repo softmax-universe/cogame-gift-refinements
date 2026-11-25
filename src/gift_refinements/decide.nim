@@ -209,11 +209,9 @@ proc strictRawObject(text: string): JsonNode =
     raise newException(ValueError, "one raw JSON object required")
 
 proc strictNativeObject(text: string): JsonNode =
-  ## Parse the single bare or outer-fenced JSON object strictly (RFC 8259 + UTF-8).
+  ## Parse the extracted bare or final-fenced JSON object strictly (RFC 8259 + UTF-8).
   if not scalarUtf8(text): raise newException(ValueError, "non-Unicode native completion")
-  let body = stripOuterJsonFence(text)
-  if body.len == 0 or body[0] != '{' or body[^1] != '}':
-    raise newException(ValueError, "no native object span")
+  let body = extractJsonObjectText(text)
   strictRawObject(body)
 
 proc suppliedFieldsEqual(raw, applied: JsonNode): bool =
@@ -587,7 +585,9 @@ proc classifyDecisionError*(
         error.msg.startsWith("invalid JSON object") or
         error.msg.startsWith("unterminated markdown fence") or
         error.msg.startsWith("unsupported markdown fence") or
+        error.msg.startsWith("malformed markdown fence") or
         error.msg.startsWith("malformed closing markdown fence") or
+        error.msg.startsWith("multiple markdown fences") or
         error.msg.startsWith("reply is not a JSON object"):
       return ("parse_error", "invalid_action")
     return ("invalid_action", "invalid_action")

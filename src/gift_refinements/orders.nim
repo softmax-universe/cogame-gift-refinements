@@ -51,43 +51,41 @@ proc defaultOrder*(): Order =
 
 const AllowedOrderFields = ["job", "target", "gift", "consume", "say", "notes"]
 
-proc stripOuterJsonFence*(text: string): string =
-  ## Unwraps a single ordinary outer Markdown code fence (plain or `json`)
-  ## when present. Leaves bare text untouched. Raises OrderError on malformed
-  ## or non-JSON outer fences.
+proc replyPreview(text: string): string =
+  var head = text.strip()
+  if head.runeLen > 160:
+    head = head.truncateRunes(160) & "\u2026"
+  head.replace("\n", " ")
+
+proc extractJsonObjectText*(text: string): string =
+  ## Extracts the single JSON object text from a bare reply, a single fenced
+  ## JSON object, or one final fenced JSON action after commentary (including
+  ## commentary that mentions braces). Rejects multiple fences, trailing prose
+  ## after a fence, unsupported/malformed fences, and non-object replies.
   result = text.strip()
-  if not result.startsWith("```"):
-    return result
-  let newline = result.find('\n')
-  if newline < 0:
-    raise newException(OrderError, "unterminated markdown fence in reply")
-  let tag = result[3 ..< newline].strip().toLowerAscii()
-  if tag.len > 0 and tag != "json":
-    raise newException(OrderError,
-      "unsupported markdown fence tag: " & tag.cleanText(40))
-  var inner = result[newline + 1 .. ^1]
-  if not inner.endsWith("```"):
-    raise newException(OrderError, "unterminated markdown fence in reply")
-  inner = inner[0 ..< inner.len - 3]
-  let lastNl = inner.rfind('\n')
-  if lastNl >= 0:
-    if inner[lastNl + 1 .. ^1].strip().len > 0:
-      raise newException(OrderError, "malformed closing markdown fence in reply")
-  elif inner.strip().len > 0:
-    raise newException(OrderError, "malformed closing markdown fence in reply")
-  result = inner.strip()
+  let lines = result.splitLines()
+  var fences: seq[int]
+  for i, line in lines:
+    if line.strip().startsWith("```"):
+      fences.add(i)
+  if fences.len > 2:
+    raise newException(OrderError, "multiple markdown fences in reply")
+  if fences.len > 0:
+    if fences.len != 2 or fences[1] != lines.high or lines[^1].strip() != "```":
+      raise newException(OrderError, "expected one final fenced JSON action")
+    let tag = lines[fences[0]].strip()[3 .. ^1].strip().toLowerAscii()
+    if tag notin ["", "json"]:
+      raise newException(OrderError, "unsupported markdown fence tag: " & tag.cleanText(40))
+    result = lines[fences[0] + 1 ..< fences[1]].join("\n").strip()
+  if result.len == 0 or result[0] != '{' or result[^1] != '}':
+    raise newException(OrderError, "reply must be one JSON object: " & replyPreview(text))
+
 
 proc extractJsonObject*(text: string): JsonNode =
-  ## Extracts exactly one JSON object, bare or inside a single ordinary outer
-  ## Markdown code fence (JSON-tagged or plain). Rejects surrounding prose,
-  ## extra objects, and non-object JSON values.
-  let body = stripOuterJsonFence(text)
-  if body.len == 0 or body[0] != '{' or body[^1] != '}':
-    var head = text.strip()
-    if head.runeLen > 160:
-      head = head.truncateRunes(160) & "\u2026"
-    raise newException(
-      OrderError, "reply must be one JSON object: " & head.replace("\n", " "))
+  ## Extracts exactly one JSON object: bare JSON, a fenced JSON object, or one
+  ## final fenced JSON action after commentary. Rejects multiple competing
+  ## fences, trailing prose, extra objects, and non-object JSON values.
+  let body = extractJsonObjectText(text)
   try:
     result = parseJson(body)
   except CatchableError as error:

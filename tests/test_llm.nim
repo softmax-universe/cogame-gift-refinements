@@ -32,12 +32,29 @@ block extractsBareAndSingleFencedObjectsOnly:
   let fencedPlain = "```\n{\"job\":\"evade\"}\n```"
   check(extractJsonObject(fencedPlain){"job"}.getStr() == "evade",
     "a single plain ``` fenced object was not parsed")
+  let commentaryJson =
+    "I need to analyze this strategically.\n\n" &
+    "**Current situation:**\n" &
+    "- I'm at (21,7), holding nothing; quoting {\"job\":\"hold\"} or {braces} in prose.\n\n" &
+    "```json\n{\"job\":\"collect\",\"consume\":\"end\"}\n```\n"
+  check(extractJsonObject(commentaryJson){"job"}.getStr() == "collect",
+    "commentary with intro braces and one final ```json fence was not parsed")
+  let commentaryPlain =
+    "Thinking through options like {\"job\":\"evade\"} before deciding.\n```\n{\"job\":\"hold\"}\n```"
+  check(extractJsonObject(commentaryPlain){"job"}.getStr() == "hold",
+    "commentary with one final plain ``` fence was not parsed")
   for bad in [
     "Sure! Here you go:\n```json\n{\"job\":\"meet\",\"target\":\"Aro\",\"gift\":2}\n```\nHope that helps.",
     "I think Cyr should hold. {\"job\":\"hold\",\"gift\":0} Done.",
+    "I think Cyr should hold.\n{\"job\":\"hold\",\"gift\":0}",
     "{\"job\":\"hold\"} {\"job\":\"collect\"}",
     "```json\n{\"job\":\"hold\"}\n```\n```json\n{\"job\":\"collect\"}\n```",
+    "Option A:\n```json\n{\"job\":\"hold\"}\n```\nOption B:\n```json\n{\"job\":\"collect\"}\n```",
     "```python\n{\"job\":\"hold\"}\n```",
+    "Analysis:\n```json\n{\"job\":\"hold\"}\n",
+    "Analysis:\n```json\n{\"job\":\"hold\"}\n``` trailing",
+    "```{\"job\":\"hold\"}```",
+    "Analysis:\n```json\n[1, 2, 3]\n```",
     "no object here at all"
   ]:
     var raised = false
@@ -45,8 +62,8 @@ block extractsBareAndSingleFencedObjectsOnly:
       discard extractJsonObject(bad)
     except OrderError:
       raised = true
-    check(raised, "ambiguous or prose-wrapped reply was accepted: " & bad)
-  banner "extractJsonObject accepts one bare or outer-fenced object and rejects prose/extra objects"
+    check(raised, "ambiguous or malformed reply was accepted: " & bad)
+  banner "extractJsonObject accepts bare, fenced, or commentary + one final fenced object and rejects competing/malformed replies"
 
 proc parses(payload: string, seat = 2): Order =
   parseOrder(extractJsonObject(payload), seat, aliases, DefaultMaxBeamsPerRound)
@@ -405,10 +422,18 @@ block classifyErrorDistinguishesInfraFromInvalidAction:
     newException(LlmError, "llm auth failed (401) at x: bad key"), "")
   check(authErr.cause == "auth_error" and authErr.category == "infrastructure",
     "401 auth error was misclassified")
+  let provider503 = classifyDecisionError(
+    newException(LlmError, "anthropic error 503: service unavailable"), "")
+  check(provider503.cause == "provider_error" and provider503.category == "infrastructure",
+    "503 provider error was misclassified")
   let parseErr = classifyDecisionError(
     newException(OrderError, "reply must be one JSON object: hello"), "")
   check(parseErr.cause == "parse_error" and parseErr.category == "invalid_action",
     "parse error was misclassified")
+  let multiFenceErr = classifyDecisionError(
+    newException(OrderError, "multiple markdown fences in reply"), "")
+  check(multiFenceErr.cause == "parse_error" and multiFenceErr.category == "invalid_action",
+    "multiple fences error was misclassified")
   let invalidErr = classifyDecisionError(
     newException(OrderError, "unknown job dance (expected collect|meet|hold|evade)"), "")
   check(invalidErr.cause == "invalid_action" and invalidErr.category == "invalid_action",
