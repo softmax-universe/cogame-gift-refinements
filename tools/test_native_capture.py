@@ -17,6 +17,17 @@ from urllib.request import urlopen
 from uuid import UUID
 
 
+FAILURE_MODES = {
+    "throttle",
+    "normalized",
+    "clamped",
+    "unknown",
+    "ambiguous",
+    "consume_job",
+    "meet_no_target",
+}
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -225,6 +236,7 @@ def run_case(
         for k, v in os.environ.items()
         if not k.startswith(("AWS_", "ANTHROPIC_", "COWORLD_", "COGAME_", "PLAYER_"))
     }
+    env["COGAME_PLAYER_FAILURE_URI"] = (root / "player_failure.json").as_uri()
     env.update(
         COWORLD_LLM_ENDPOINT=f"http://127.0.0.1:{server.server_port}",
         COWORLD_LLM_MODEL="local/capture-sentinel",
@@ -384,17 +396,24 @@ def run_case(
         ), "native batch spacing was shortened"
     (root / "sentinel-http.json").write_text(json.dumps(records, indent=2))
     replay = json.loads((root / "replay.json").read_text())
-    results = json.loads((root / "results.json").read_text())
-    failure_modes = {
-        "throttle",
-        "normalized",
-        "clamped",
-        "unknown",
-        "ambiguous",
-        "consume_job",
-        "meet_no_target",
-    }
-    if mode in failure_modes:
+    if mode in FAILURE_MODES:
+        assert not (root / "results.json").exists(), (
+            "failed episode must not write a public results.json payload"
+        )
+        failure_path = root / "player_failure.json"
+        assert failure_path.exists(), (
+            "failed episode with known seat must write player_failure.json"
+        )
+        player_failure = json.loads(failure_path.read_text())
+        assert set(player_failure.keys()) == {"message", "failed_policy_index", "kind"}
+        assert isinstance(player_failure["message"], str)
+        assert 1 <= len(player_failure["message"]) <= 2000
+        assert player_failure["failed_policy_index"] == 0
+        expected_kind = (
+            "episode_inconclusive" if mode == "throttle" else "player_error"
+        )
+        assert player_failure["kind"] == expected_kind
+        results = replay["results"]
         assert results["reason"] == "error" and results["ending"] == "error"
         assert results["scored"] is False
         assert "scores" not in results and "win" not in results
@@ -419,6 +438,7 @@ def run_case(
                 "mode": mode,
                 "variant": variant,
                 "reason": "error",
+                "failure_kind": expected_kind,
                 "http_calls": len(records),
             }
         assert trajectory.stat().st_mode & 0o777 == 0o600
@@ -442,11 +462,14 @@ def run_case(
             "mode": mode,
             "variant": variant,
             "reason": "error",
+            "failure_kind": expected_kind,
             "failure_category": expected_cat,
             "failure_cause": expected_cause,
             "http_calls": len(records),
             "trajectory_sha256": hashlib.sha256(trajectory.read_bytes()).hexdigest(),
         }
+    assert not (root / "player_failure.json").exists()
+    results = json.loads((root / "results.json").read_text())
     assert results["reason"] == "complete" and results["rounds"] == 12
     assert len(replay["frames"]) == 720
     trajectory = root / "trajectory.jsonl"
@@ -567,6 +590,7 @@ def run_ownership_case(game, output, expect):
         for k, v in os.environ.items()
         if not k.startswith(("AWS_", "ANTHROPIC_", "COWORLD_", "COGAME_", "PLAYER_"))
     }
+    env["COGAME_PLAYER_FAILURE_URI"] = (root / "player_failure.json").as_uri()
     sockets = []
     observations = {}
     with (root / "game.log").open("wb") as log:
@@ -605,6 +629,14 @@ def run_ownership_case(game, output, expect):
                 observations["bad_token_refused"] = True
             else:
                 raise AssertionError("bad token accepted")
+            for seat in range(1, 6):
+                peer = connect(
+                    f"ws://127.0.0.1:{port}/player?slot={seat}&token=t{seat}",
+                    open_timeout=1,
+                    legacy=True,
+                )
+                sockets.append(peer)
+                peer.send(json.dumps({"type": "prompt", "scripted": "reciprocator"}))
             owner = connect(
                 f"ws://127.0.0.1:{port}/player?slot=0&token=t0",
                 open_timeout=1,
@@ -645,10 +677,20 @@ def run_ownership_case(game, output, expect):
                     observations["rejected_frame_closed"] = True
             process.wait(timeout=10)
             assert process.returncode == 0
-            result = json.loads((root / "results.json").read_text())
-            observations["reason"] = result["reason"]
-            assert result["reason"] == ("error" if expect == "red" else "complete")
-            if expect == "green":
+            if expect == "red":
+                assert not (root / "results.json").exists()
+                pf = json.loads((root / "player_failure.json").read_text())
+                assert set(pf.keys()) == {"message", "failed_policy_index", "kind"}
+                assert pf["kind"] == "episode_inconclusive"
+                assert pf["failed_policy_index"] == 0
+                replay = json.loads((root / "replay.json").read_text())
+                observations["reason"] = replay["results"]["reason"]
+                assert replay["results"]["reason"] == "error"
+            else:
+                assert not (root / "player_failure.json").exists()
+                result = json.loads((root / "results.json").read_text())
+                observations["reason"] = result["reason"]
+                assert result["reason"] == "complete"
                 replay = json.loads((root / "replay.json").read_text())
                 assert len(replay["frames"]) == 120
         finally:
@@ -732,9 +774,18 @@ def main():
             )
             before = output / mode
             after = output / (mode + "-no-capture")
-            assert json.loads((before / "results.json").read_text()) == json.loads(
-                (after / "results.json").read_text()
-            )
+            if mode in FAILURE_MODES:
+                assert not (before / "results.json").exists()
+                assert not (after / "results.json").exists()
+                assert json.loads(
+                    (before / "player_failure.json").read_text()
+                ) == json.loads((after / "player_failure.json").read_text())
+            else:
+                assert not (before / "player_failure.json").exists()
+                assert not (after / "player_failure.json").exists()
+                assert json.loads((before / "results.json").read_text()) == json.loads(
+                    (after / "results.json").read_text()
+                )
             assert (
                 json.loads((before / "replay.json").read_text())["frames"]
                 == json.loads((after / "replay.json").read_text())["frames"]

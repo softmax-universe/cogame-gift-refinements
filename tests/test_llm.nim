@@ -6,7 +6,7 @@ import gift_refinements/prompts
 ## fallback path. The transport is exercised through the real `decide.turn`
 ## with NO credentials, which is the same path certification runs.
 
-import std/[json, monotimes, os, strutils, times]
+import std/[json, monotimes, options, os, strutils, times, unicode]
 
 import ./helpers
 import curly
@@ -324,7 +324,69 @@ block offlineTurnFailsCleanlyWithoutSubstitutingMoves:
     "results.failure_cause mismatch")
   check(results{"failure_category"}.getStr() == "infrastructure",
     "results.failure_category mismatch")
+  let pf = sim.playerFailureJson()
+  check(pf.isSome, "known-seat infrastructure failure must produce GamePlayerFailure")
+  check(pf.get().len == 3 and pf.get()["failed_policy_index"].getInt() == 0 and
+    pf.get()["kind"].getStr() == "episode_inconclusive" and
+    pf.get()["message"].getStr().runeLen in 1 .. MaxPlayerFailureMessageRunes,
+    "infrastructure GamePlayerFailure payload mismatch: " & $pf.get())
   banner "with no credentials LLM seats fail cleanly with no fake moves and unscored results"
+
+block canonicalPlayerFailurePayload:
+  var okSim = initSimServer(defaultGameConfig())
+  okSim.finish(erComplete)
+  check(okSim.playerFailureJson().isNone,
+    "completed episode must not emit GamePlayerFailure")
+
+  var noFailureSim = initSimServer(defaultGameConfig())
+  noFailureSim.finish(erError)
+  check(noFailureSim.playerFailureJson().isNone,
+    "error without a recorded seat must not invent a seat or GamePlayerFailure")
+
+  for badSeat in [-1, SeatCount]:
+    var unknownSeatSim = initSimServer(defaultGameConfig())
+    unknownSeatSim.failures.add(EpisodeFailure(
+      round: 1, seat: badSeat, attempt: 1,
+      cause: "provider_error", category: "infrastructure", detail: "unknown seat"))
+    unknownSeatSim.finish(erError)
+    check(unknownSeatSim.playerFailureJson().isNone,
+      "out-of-range seat must not emit GamePlayerFailure")
+
+  var policySim = initSimServer(defaultGameConfig())
+  policySim.failures.add(EpisodeFailure(
+    round: 6, seat: 2, attempt: 1,
+    cause: "invalid_action", category: "invalid_action",
+    detail: "target is required when job is meet or gift > 0"))
+  policySim.finish(erError)
+  let policyPf = policySim.playerFailureJson()
+  check(policyPf.isSome, "known-seat invalid_action must produce GamePlayerFailure")
+  check(policyPf.get().len == 3 and
+    policyPf.get().hasKey("message") and
+    policyPf.get().hasKey("failed_policy_index") and
+    policyPf.get().hasKey("kind"),
+    "GamePlayerFailure must have only canonical keys")
+  check(policyPf.get()["failed_policy_index"].getInt() == 2,
+    "failed_policy_index must match failing seat")
+  check(policyPf.get()["kind"].getStr() == "player_error",
+    "invalid_action must map to player_error")
+  check("target is required" in policyPf.get()["message"].getStr(),
+    "message must retain failure detail")
+
+  var longSim = initSimServer(defaultGameConfig())
+  longSim.failures.add(EpisodeFailure(
+    round: 2, seat: 4, attempt: 1,
+    cause: "throttled", category: "infrastructure",
+    detail: "é".repeat(2500)))
+  longSim.finish(erError)
+  let longPf = longSim.playerFailureJson()
+  check(longPf.isSome, "long infrastructure failure must produce GamePlayerFailure")
+  let longMsg = longPf.get()["message"].getStr()
+  check(longPf.get()["kind"].getStr() == "episode_inconclusive" and
+    longPf.get()["failed_policy_index"].getInt() == 4 and
+    longMsg.runeLen == MaxPlayerFailureMessageRunes and
+    scalarUtf8(longMsg),
+    "long GamePlayerFailure message must be rune-truncated <= 2000 and valid UTF-8")
+  banner "playerFailureJson emits canonical GamePlayerFailure only when seat is known"
 
 block classifyErrorDistinguishesInfraFromInvalidAction:
   let transportTimeout = classifyDecisionError(
@@ -387,16 +449,25 @@ block promptsCarryTheContract:
     "the operator block is missing from the user prompt")
   check("GUIDANCE FROM YOUR OPERATOR" in user,
     "the operator heading is missing")
-  check("\"target\":\"Aro\"|" in user,
+  check("targets: \"Aro\"|" in user,
     "the user prompt does not precompute the legal target set")
   check("Never set \"job\" to \"consume\"" in system,
     "the system prompt does not disambiguate job vs consume")
-  check("Required (non-null) whenever \"job\" is \"meet\" or \"gift\" > 0" in system,
+  check("required whenever \"job\" is \"meet\" or \"gift\" > 0" in system,
     "the system prompt does not state target requirement for meet/gift")
+  check("{\"job\":\"meet\",\"target\":\"Aro\",\"gift\":3,\"consume\":\"never\"}" in system and
+    "{\"job\":\"collect\",\"consume\":\"end\"}" in system,
+    "the system prompt does not include separate meet/target and collect/bank examples")
   check("never set \"job\" to \"consume\"" in user,
     "the user prompt does not disambiguate job vs consume")
-  check("when \"job\" is \"meet\" or \"gift\" > 0" in user,
+  check("whenever \"job\" is \"meet\" or \"gift\" > 0" in user,
     "the user prompt does not state target requirement for meet/gift")
+  check("{\"job\":\"meet\",\"target\":\"Aro\",\"gift\":2,\"consume\":\"never\"}" in user and
+    "{\"job\":\"collect\",\"consume\":\"end\"}" in user,
+    "the user prompt does not include separate meet/target and collect/bank examples")
+  check("|null" notin user and "alias or null" notin system and
+    "\"target\":null" notin system and "\"target\":null" notin user,
+    "prompts must not include mandatory-null target boilerplate")
   # NOTHING about the other seats' inventories, policies or the seed.
   for forbidden in ["policyNames", "gift-refinements-mirror", "seed"]:
     check(forbidden notin system and forbidden notin user,
