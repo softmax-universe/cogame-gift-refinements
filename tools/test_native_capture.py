@@ -163,6 +163,10 @@ def run_case(
                 order.update(say="a" * 90, notes="b" * 400)
             if mode == "unknown":
                 order["unknown_field"] = 1
+            if mode == "consume_job":
+                order = {"job": "consume", "target": None, "gift": 0, "consume": "now"}
+            if mode == "meet_no_target":
+                order = {"job": "meet", "target": None, "gift": 0, "consume": "never"}
             if mode == "normalized":
                 order["gift"] = "0"  # native repair; cannot become an unchanged label
             text = json.dumps(order, separators=(",", ":"))
@@ -170,8 +174,6 @@ def run_case(
                 text = "```json\n" + text + "\n```"
             if mode == "ambiguous":
                 text = text + " " + text
-            if mode == "retry" and number % 2 == 0:
-                text = "invalid local sentinel response"
             status = 429 if mode == "throttle" else 200
             body = json.dumps(
                 {
@@ -383,7 +385,15 @@ def run_case(
     (root / "sentinel-http.json").write_text(json.dumps(records, indent=2))
     replay = json.loads((root / "replay.json").read_text())
     results = json.loads((root / "results.json").read_text())
-    failure_modes = {"throttle", "normalized", "clamped", "truncated", "unknown", "ambiguous"}
+    failure_modes = {
+        "throttle",
+        "normalized",
+        "clamped",
+        "unknown",
+        "ambiguous",
+        "consume_job",
+        "meet_no_target",
+    }
     if mode in failure_modes:
         assert results["reason"] == "error" and results["ending"] == "error"
         assert results["scored"] is False
@@ -400,7 +410,7 @@ def run_case(
         assert results["failure_cause"] == expected_cause
         assert results["rounds"] == 0
         assert len(replay["frames"]) == 1
-        expected_calls = 1 if mode == "throttle" else 2
+        expected_calls = 1
         assert len(records) == expected_calls
         trajectory = root / "trajectory.jsonl"
         if not capture:
@@ -512,12 +522,15 @@ def run_case(
             }
             if attempt["accepted"]:
                 assert attempt["parsed_action"] == action
+            else:
+                exclusions += 1
         if seat:
             assert not row["attempts"] and row["selected_attempt_id"] is None
-    expected_calls = 24 if mode == "retry" else 12
+    expected_calls = 12
     assert len(seen) == len(records) == expected_calls
     selected = [r for r in rows[:-1] if r["selected_attempt_id"]]
-    assert len(selected) == 12
+    assert len(selected) == (0 if mode == "truncated" else 12)
+    assert exclusions == (12 if mode == "truncated" else 0)
     return {
         "mode": mode,
         "variant": variant,
@@ -684,7 +697,8 @@ def main():
             ("defaulted", "refinery"),
             ("normalized", "refinery"),
             ("ambiguous", "refinery"),
-            ("retry", "refinery"),
+            ("consume_job", "refinery"),
+            ("meet_no_target", "refinery"),
             ("throttle", "refinery"),
             ("clamped", "refinery"),
             ("truncated", "refinery"),

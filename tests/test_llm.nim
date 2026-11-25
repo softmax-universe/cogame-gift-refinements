@@ -61,6 +61,9 @@ proc rejects(payload: string, why: string, seat = 2) =
 
 block schemaRejects:
   rejects("""{"job":"dance","target":null,"gift":0}""", "an unknown job was accepted")
+  rejects("""{"job":"consume","target":null,"gift":0}""",
+    "consume as unknown job was accepted")
+  rejects("""{"job":"consume"}""", "consume as unknown job without fields was accepted")
   rejects("""{"target":"Aro","gift":1}""", "a reply with no job was accepted")
   rejects("""{"job":"meet","target":"Cyr","gift":1}""",
     "a cog was allowed to target itself")
@@ -72,6 +75,7 @@ block schemaRejects:
     "gift > 0 with a null target was accepted")
   rejects("""{"job":"meet","target":null,"gift":0}""",
     "job meet with a null target was accepted")
+  rejects("""{"job":"meet"}""", "job meet lacking target was accepted")
   rejects("""{"job":"collect","gift":"lots"}""", "a non-integer gift was accepted")
   rejects("""{"job":"collect","gift":"2","target":"Aro"}""",
     "a string-encoded gift was accepted")
@@ -178,10 +182,10 @@ block wholeSecondDeadlines:
   ## curly floors CURLOPT_TIMEOUT to whole seconds, so a sub-second deadline is
   ## not the deadline it claims to be. sim_config REJECTS one.
   var config = defaultGameConfig()
-  check(config.attempt1Ms mod 1000 == 0 and config.retryMs mod 1000 == 0,
-    "the shipped deadlines are not whole seconds")
-  check(config.attempt1Ms + config.retryMs <= config.turnBudgetMs,
-    "the two attempts do not fit inside turnBudgetMs")
+  check(config.attempt1Ms mod 1000 == 0,
+    "the shipped deadline is not whole seconds")
+  check(config.attempt1Ms <= config.turnBudgetMs,
+    "attempt1Ms does not fit inside turnBudgetMs")
   config.attempt1Ms = 4500
   var raised = false
   try:
@@ -196,15 +200,15 @@ block wholeSecondDeadlines:
     config.validate()
   except GiftError:
     raised = true
-  check(raised, "attempt1Ms + retryMs > turnBudgetMs was accepted")
-  banner "whole-second deadlines, and both attempts must fit the turn budget"
+  check(raised, "attempt1Ms > turnBudgetMs was accepted")
+  banner "whole-second attempt1Ms deadline fits inside turnBudgetMs"
 
 block requestRateStaysUnderThirtyPerMinute:
   ## The Bedrock sidecar caps 30 requests/minute PER EPISODE (raid,
-  ## 2026-08-23). Worst case is six seats plus six retries per round, and the
-  ## next batch cannot start before minTurnSeconds.
+  ## 2026-08-23). Each round issues at most one batch of six seats (no hidden
+  ## retry batch), and the next batch cannot start before minTurnSeconds.
   let config = defaultGameConfig()
-  let worstPerRound = SeatCount * 2
+  let worstPerRound = SeatCount
   let ratePerMinute = worstPerRound * 60 div max(1, config.minTurnSeconds)
   check(ratePerMinute < 30,
     "worst-case request rate is " & $ratePerMinute & "/min")
@@ -265,14 +269,7 @@ block oneBatchCarriesEveryOpenSeat:
   check(batch.len == open.len,
     "the batch carries " & $batch.len & " requests for " & $open.len &
     " open seats")
-  var retry: RequestBatch
-  for seat in [1, 4]:
-    let view = sim.seatView(seat)
-    let request = client.requestFor(
-      systemPrompt(view, scene, PromptSelection()), userPrompt(view, scene, ""), 0)
-    retry.post(request.url, request.headers, request.body, $seat)
-  check(retry.len == 2, "the retry batch must carry ONLY the failed seats")
-  banner "one batch of six on round one; the retry batch carries only the failures"
+  banner "one batch of six per round with no hidden retry batch"
 
 block offlineTurnFailsCleanlyWithoutSubstitutingMoves:
   ## With NO credentials the client disables itself instantly and every LLM
@@ -392,6 +389,14 @@ block promptsCarryTheContract:
     "the operator heading is missing")
   check("\"target\":\"Aro\"|" in user,
     "the user prompt does not precompute the legal target set")
+  check("Never set \"job\" to \"consume\"" in system,
+    "the system prompt does not disambiguate job vs consume")
+  check("Required (non-null) whenever \"job\" is \"meet\" or \"gift\" > 0" in system,
+    "the system prompt does not state target requirement for meet/gift")
+  check("never set \"job\" to \"consume\"" in user,
+    "the user prompt does not disambiguate job vs consume")
+  check("when \"job\" is \"meet\" or \"gift\" > 0" in user,
+    "the user prompt does not state target requirement for meet/gift")
   # NOTHING about the other seats' inventories, policies or the seed.
   for forbidden in ["policyNames", "gift-refinements-mirror", "seed"]:
     check(forbidden notin system and forbidden notin user,

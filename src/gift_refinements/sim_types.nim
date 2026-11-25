@@ -49,7 +49,6 @@ const
   DefaultPillars* = 5
 
   DefaultAttempt1Ms* = 20_000
-  DefaultRetryMs* = 12_000
   DefaultTurnBudgetMs* = 34_000
   DefaultMinTurnSeconds* = 25
   DefaultMaxOutputTokens* = 1000

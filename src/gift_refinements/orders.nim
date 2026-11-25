@@ -25,7 +25,6 @@ type
 
   OrderSource* = enum
     osLlm = "llm"
-    osRetry = "retry"
     osFallback = "fallback"
     osScripted = "scripted"
     osExternal = "external"
@@ -45,8 +44,7 @@ type
     latencyMs*: int
 
   OrderError* = object of ValueError
-    ## An INVALID REPLY in the design note's table: the retry batch and then
-    ## the scripted fallback are what this exists for.
+    ## An INVALID REPLY: rejected strictly so invalid orders fail unscored.
 
 proc defaultOrder*(): Order =
   Order(job: jobCollect, target: -1, gift: 0, consume: cwEnd, source: osScripted)
