@@ -634,7 +634,7 @@ def run_ownership_case(game, output, expect):
             assert process.returncode == 0
             result = json.loads((root / "results.json").read_text())
             observations["reason"] = result["reason"]
-            assert result["reason"] == ("forfeit" if expect == "red" else "complete")
+            assert result["reason"] == ("error" if expect == "red" else "complete")
             if expect == "green":
                 replay = json.loads((root / "replay.json").read_text())
                 assert len(replay["frames"]) == 120

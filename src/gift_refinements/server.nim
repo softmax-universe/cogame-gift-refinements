@@ -468,7 +468,7 @@ proc runEpisode*(
   # --- the lobby ------------------------------------------------------------
   # The early return is `lobbyShouldClose`: EVERY declared seat connected and
   # registered, never "every socket that happens to be connected". Bounded by
-  # playerConnectTimeoutSeconds either way; missing seats play reciprocator.
+  # playerConnectTimeoutSeconds bounds the wait for the declared roster.
   var registered = 0
   while true:
     registered += engine.drainRegistrations()
@@ -483,16 +483,22 @@ proc runEpisode*(
   for slot in seated:
     sendSeat(slot, welcomeJson(sim, slot))
 
-  var reason = erComplete
-  if seated.len == 0:
-    # Nobody connected inside the grace: a forfeit still writes results AND a
-    # replay, because a missing artifact is indistinguishable from a crash.
-    reason = erForfeit
+  proc recordMissingRoster(round: int): bool =
+    let connected = connectedSeats()
+    for slot in 0 ..< config.numAgents:
+      if slot notin connected or not engine.seats[slot].registered:
+        sim.failures.add(EpisodeFailure(round: round, seat: slot,
+          cause: "missing_seat", category: "infrastructure",
+          detail: "required seat disconnected or did not register"))
+        result = true
 
-  # --- the round loop -------------------------------------------------------
-  if reason != erForfeit:
+  var reason = if recordMissingRoster(0): erError else: erComplete
+  if reason == erComplete:
     for roundIndex in 1 .. config.rounds:
       discard engine.drainRegistrations()
+      if recordMissingRoster(roundIndex):
+        reason = erError
+        break
       # The play deadline is checked BETWEEN ROUNDS: hitting it settles with
       # reason "deadline" rather than overrunning, because an overrun episode
       # is silently discarded by the platform.
@@ -573,6 +579,9 @@ proc runEpisode*(
                 "reason": "invalid_action", "detail": error.msg})
               if engine.captureEnabled:
                 engine.decisions[slot].status = asRejected
+      if recordMissingRoster(roundIndex):
+        reason = erError
+        break
       if roundFailures.len > 0:
         sim.failures.add(roundFailures)
         reason = erError

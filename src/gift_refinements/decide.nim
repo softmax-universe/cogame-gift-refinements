@@ -35,8 +35,7 @@ import ./sim_types, ./sim_config, ./sim, ./orders, ./scripted, ./llm
 
 type
   SeatPolicy* = object
-    ## What one seat registered as. A seat that registers with neither field --
-    ## or never registers at all -- is `reciprocator`.
+    ## A connected player explicitly registers its policy.
     isLlm*: bool
     isExternal*: bool
     prompt*: string
@@ -239,9 +238,6 @@ proc initDecisionEngine*(sim: SimServer, selection: PromptSelection,
   result.captureEnabled = captureEnabled
   result.selection = selection
   result.client = newLlmClient(sim.config)
-  for slot in 0 ..< SeatCount:
-    result.seats[slot].baseline = blReciprocator
-    result.seats[slot].label = "reciprocator"
 
 proc policyKind*(engine: DecisionEngine, seat: int): string =
   if seat >= 0 and seat < SeatCount and engine.seats[seat].isExternal: "external"
