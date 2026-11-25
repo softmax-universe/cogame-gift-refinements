@@ -40,10 +40,10 @@ type
       ## no manifest player or policy names it.
 
 proc parseBaseline*(text: string): Baseline =
-  ## PLAYER_SCRIPTED values. Empty defaults to `reciprocator`; any other
+  ## PLAYER_SCRIPTED values. An empty or
   ## unrecognised name raises ValueError. `leech` is test-only and rejected here.
   case text
-  of "", "reciprocator": blReciprocator
+  of "reciprocator": blReciprocator
   of "hoarder": blHoarder
   else:
     raise newException(ValueError,

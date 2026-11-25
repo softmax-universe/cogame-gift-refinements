@@ -143,8 +143,8 @@
           "maxItems": 36,
           "items": {"type": "object"}
         },
-        "reason": {"type": "string", "enum": ["complete", "deadline", "forfeit", "error"]},
-        "ending": {"type": "string", "enum": ["round_limit", "deadline", "forfeit", "error"]}
+        "reason": {"type": "string", "enum": ["complete", "deadline", "error"]},
+        "ending": {"type": "string", "enum": ["round_limit", "deadline", "error"]}
       },
       "required": ["names", "reason", "ending"]
     }

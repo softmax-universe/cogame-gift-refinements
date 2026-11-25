@@ -13,7 +13,7 @@
 ##   PLAYER_SCRIPTED      reciprocator | hoarder      -> this seat is scripted
 ##   PLAYER_POLICY_LABEL  a free label for the game log
 ##
-## A seat that sets neither is `reciprocator`. To field your own policy, reuse
+## Scripted seats select their baseline explicitly. To field your own policy, reuse
 ## this image and set PLAYER_PROMPT:
 ##
 ##   coworld upload-policy <image> --name my-gift-policy \
@@ -51,17 +51,18 @@ when isMainModule:
     quit("unknown PLAYER_SCRIPTED baseline: " & scripted &
       " (expected reciprocator|hoarder)", 1)
   let useLlm = prompt.len > 0 or (scripted.len == 0 and llmEnabled)
+  if not useLlm and scripted.len == 0:
+    quit("Choose a model player or an explicit PLAYER_SCRIPTED policy", 1)
   let
     label = block:
       let explicit = getEnv("PLAYER_POLICY_LABEL").strip()
       if explicit.len > 0: explicit
       elif prompt.len > 0: "prompt"
       elif useLlm: "llm"
-      elif scripted.len > 0: scripted
-      else: "reciprocator"
+      else: scripted
   echo "gift-refinements player: kind=",
     (if useLlm: "llm" else: "scripted"),
-    " baseline=", (if useLlm: "none" elif scripted.len > 0: scripted else: "reciprocator"),
+    " baseline=", (if useLlm: "none" else: scripted),
     " label=", label
 
   proc dial(attempts: int): WebSocket =

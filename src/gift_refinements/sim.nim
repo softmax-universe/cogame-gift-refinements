@@ -27,13 +27,11 @@ type
   EndReason* = enum
     erComplete = "complete"
     erDeadline = "deadline"
-    erForfeit = "forfeit"
     erError = "error"
 
   EndEnding* = enum
     eeRoundLimit = "round_limit"
     eeDeadline = "deadline"
-    eeForfeit = "forfeit"
     eeError = "error"
 
   EpisodeFailure* = object
@@ -484,13 +482,7 @@ proc finish*(sim: var SimServer, reason: EndReason) =
   if sim.finished:
     return
   sim.finished = true
-  # A forfeit (nobody connected) and a deadline reached before the first tick
-  # both stop before any frame is recorded, and a replay with `frames: []` is
-  # one this repo's OWN parser rejects ("replay has no frames",
-  # replays.nim) -- the shipped viewer would show `data-replay-error` where the
-  # note asks for "results + replay are still written". Record the opening
-  # position so every legal `results.reason` writes a playable replay
-  # (r1 review F2).
+  # Keep the opening frame for failures that happen before the first turn.
   if sim.frames.len == 0:
     sim.captureFrame()
   sim.reason = reason
@@ -498,7 +490,6 @@ proc finish*(sim: var SimServer, reason: EndReason) =
     case reason
     of erComplete: eeRoundLimit
     of erDeadline: eeDeadline
-    of erForfeit: eeForfeit
     of erError: eeError
   var scores: seq[int] = @[]
   if reason != erError:
