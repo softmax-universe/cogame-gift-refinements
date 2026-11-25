@@ -168,6 +168,8 @@ def run_case(
             text = json.dumps(order, separators=(",", ":"))
             if mode == "fenced":
                 text = "```json\n" + text + "\n```"
+            if mode == "ambiguous":
+                text = text + " " + text
             if mode == "retry" and number % 2 == 0:
                 text = "invalid local sentinel response"
             status = 429 if mode == "throttle" else 200
@@ -322,7 +324,10 @@ def run_case(
                 COWORLD_PLAYER_WS_URL=f"ws://127.0.0.1:{port}/player?slot={seat}&token=t{seat}",
             )
             if seat == 0:
-                seat_env["PLAYER_PROMPT"] = "Local sentinel protocol test only."
+                if mode == "native_default":
+                    seat_env["COWORLD_LLM_ENABLED"] = "true"
+                else:
+                    seat_env["PLAYER_PROMPT"] = "Local sentinel protocol test only."
             else:
                 seat_env["PLAYER_SCRIPTED"] = "reciprocator"
             logs.append((root / f"player{seat}.log").open("wb"))
@@ -378,6 +383,60 @@ def run_case(
     (root / "sentinel-http.json").write_text(json.dumps(records, indent=2))
     replay = json.loads((root / "replay.json").read_text())
     results = json.loads((root / "results.json").read_text())
+    failure_modes = {"throttle", "normalized", "clamped", "truncated", "unknown", "ambiguous"}
+    if mode in failure_modes:
+        assert results["reason"] == "error" and results["ending"] == "error"
+        assert results["scored"] is False
+        assert "scores" not in results and "win" not in results
+        expected_cat = "infrastructure" if mode == "throttle" else "invalid_action"
+        expected_cause = (
+            "throttled"
+            if mode == "throttle"
+            else "parse_error"
+            if mode == "ambiguous"
+            else "invalid_action"
+        )
+        assert results["failure_category"] == expected_cat
+        assert results["failure_cause"] == expected_cause
+        assert results["rounds"] == 0
+        assert len(replay["frames"]) == 1
+        expected_calls = 1 if mode == "throttle" else 2
+        assert len(records) == expected_calls
+        trajectory = root / "trajectory.jsonl"
+        if not capture:
+            assert not trajectory.exists()
+            return {
+                "mode": mode,
+                "variant": variant,
+                "reason": "error",
+                "http_calls": len(records),
+            }
+        assert trajectory.stat().st_mode & 0o777 == 0o600
+        rows = [json.loads(line) for line in trajectory.read_text().splitlines()]
+        assert len(rows) == 7 and rows[-1]["status"] == "failed"
+        assert rows[-1]["outcome"] == results
+        assert rows[-1]["participant_outcomes"] is None
+        seat0 = rows[0]
+        assert seat0["seat"] == "0"
+        assert seat0["executed_action"] is None
+        assert seat0["selected_attempt_id"] is None
+        assert seat0["fallback_origin"] is None
+        assert seat0["action_status"] == (
+            "missing" if mode == "throttle" else "rejected"
+        )
+        assert len(seat0["attempts"]) == expected_calls
+        for attempt in seat0["attempts"]:
+            assert not attempt["accepted"] and attempt["parsed_action"] is None
+            assert attempt["rejection_reason"]
+        return {
+            "mode": mode,
+            "variant": variant,
+            "reason": "error",
+            "failure_category": expected_cat,
+            "failure_cause": expected_cause,
+            "http_calls": len(records),
+            "trajectory_sha256": hashlib.sha256(trajectory.read_bytes()).hexdigest(),
+        }
     assert results["reason"] == "complete" and results["rounds"] == 12
     assert len(replay["frames"]) == 720
     trajectory = root / "trajectory.jsonl"
@@ -451,30 +510,14 @@ def run_case(
             assert attempt["decoder"] == {
                 k: v for k, v in record["request"].items() if k in decoder_keys
             }
-            if mode in {"normalized", "clamped", "truncated", "unknown"}:
-                assert not attempt["accepted"] and attempt["parsed_action"] == action
-                assert (
-                    row["action_status"] == "rejected"
-                    and row["selected_attempt_id"] is None
-                )
-                assert "changed a supplied JSON" in attempt["rejection_reason"]
-                assert (
-                    native["source"] == "llm"
-                )  # gameplay still applies its ordinary native parser
-                exclusions += 1
-            elif attempt["accepted"]:
+            if attempt["accepted"]:
                 assert attempt["parsed_action"] == action
         if seat:
             assert not row["attempts"] and row["selected_attempt_id"] is None
-    assert len(seen) == len(records) == (24 if mode == "retry" else 12)
+    expected_calls = 24 if mode == "retry" else 12
+    assert len(seen) == len(records) == expected_calls
     selected = [r for r in rows[:-1] if r["selected_attempt_id"]]
-    assert len(selected) == (
-        0
-        if mode in {"throttle", "normalized", "clamped", "truncated", "unknown"}
-        else 12
-    )
-    if mode == "throttle":
-        assert sum(r["action_status"] == "fallback" for r in rows[:-1]) == 12
+    assert len(selected) == 12
     return {
         "mode": mode,
         "variant": variant,
@@ -636,9 +679,11 @@ def main():
         if args.expect_missing
         else [
             ("success", "refinery"),
+            ("native_default", "refinery"),
             ("fenced", "open-floor"),
             ("defaulted", "refinery"),
             ("normalized", "refinery"),
+            ("ambiguous", "refinery"),
             ("retry", "refinery"),
             ("throttle", "refinery"),
             ("clamped", "refinery"),

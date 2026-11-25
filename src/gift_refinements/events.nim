@@ -124,7 +124,8 @@ proc jsonRow*(event: GiftEvent): JsonNode =
   of evEnd:
     result["reason"] = %event.reason
     result["ending"] = %event.ending
-    result["scores"] = %event.scores
+    if event.reason != "error":
+      result["scores"] = %event.scores
 
 proc eventsJson*(events: openArray[GiftEvent]): JsonNode =
   result = newJArray()

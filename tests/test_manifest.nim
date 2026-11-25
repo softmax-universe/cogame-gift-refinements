@@ -136,6 +136,19 @@ block secretsAndNamespaces:
     "game.name is " & game["name"].getStr() & ", expected " & GameName)
   doAssert game{"runnable"}{"env"}{"ANTHROPIC_API_KEY_URI"}.isNil,
     "hosted LLM uses the platform sidecar without provider secrets"
+  check(game{"runnable"}{"env"}{"COWORLD_LLM_ENABLED"}.getStr() == "true",
+    "game.runnable.env must set COWORLD_LLM_ENABLED=true for server-side inference")
+  check(game{"runnable"}{"env"}{"COWORLD_LLM_MODEL"}.getStr().len > 0,
+    "game.runnable.env must declare a default COWORLD_LLM_MODEL")
+  let firstPlayer = manifest["player"][0]
+  check(firstPlayer["id"].getStr() == "gift-refinements-player",
+    "first player entry must be the native model player")
+  check(firstPlayer{"env"}{"COWORLD_LLM_ENABLED"}.getStr() == "true",
+    "native model player must set COWORLD_LLM_ENABLED=true")
+  check(firstPlayer{"env"}{"COWORLD_LLM_MODEL"}.getStr().len > 0,
+    "native model player must declare a default COWORLD_LLM_MODEL")
+  check(firstPlayer{"env"}{"PLAYER_SCRIPTED"}.isNil,
+    "native model player must not set PLAYER_SCRIPTED")
   check(game["runnable"]["type"].getStr() == "game",
     "game.runnable.type must be \"game\" for the 0.1.42 upload contract")
   check(game.hasKey("owner"), "game.owner is required")

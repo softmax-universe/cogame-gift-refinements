@@ -133,10 +133,7 @@ proc newLlmClient*(config: GameConfig): LlmClient =
   else:
     result.transport = ltNone
     result.disabled = true
-    ## The exact phrase phase 60 greps the GAME log for, alongside
-    ## "falling back": "LLM provider is unavailable".
-    echo LogPrefix, "no credentials \u2014 the LLM provider is unavailable; ",
-      "every round is falling back to the scripted layer"
+    echo LogPrefix, "no credentials \u2014 the LLM provider is unavailable"
 
 proc requestFor*(
   client: LlmClient, system, user: string, slot: int

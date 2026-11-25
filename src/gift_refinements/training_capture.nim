@@ -74,23 +74,65 @@ proc finishRound*(capture: MatchCapture, sim: SimServer) =
       if status != asFallback: status = asRejected
       capture.failed = true
       if capture.errors.len < 16: capture.errors.add(detail)
+    let fallbackOrigin =
+      if status != asFallback: none(string)
+      else: some("engine-reciprocator")
     capture.trajectory.recordDecision($capture.round & "-" & $seat, $seat, observation,
       attempts, selected, actual, status, sim.round >= sim.config.rounds,
-      if status == asFallback: some("engine-reciprocator") else: none(string))
+      fallbackOrigin)
+
+proc recordFailedRound*(capture: MatchCapture, engine: DecisionEngine,
+    sim: SimServer, round: int) =
+  ## Records rejected/missing decision evidence for an aborted round without
+  ## inventing executed actions or fallback moves.
+  capture.failed = true
+  for seat in 0 ..< SeatCount:
+    let decision = engine.decisions[seat]
+    var observation = copy(decision.observation)
+    var attempts = decision.attempts
+    var selected = decision.selectedAttemptId
+    var status = decision.status
+    var actual =
+      if sim.haveOrder[seat]: sim.orders[seat].orderJson(sim.aliases)
+      else: newJNull()
+    if status == asAccepted and not sim.haveOrder[seat]:
+      status = asMissing
+      selected = none(string)
+    var originalAttempts = newJArray()
+    for evidence in attempts: originalAttempts.add(attemptEvidenceJson(evidence))
+    let original = %*{"observation": observation, "attempts": originalAttempts,
+      "executed_action": actual,
+      "actual_scripted": sim.haveOrder[seat] and sim.orders[seat].source == osScripted}
+    if not scalarJson(original):
+      let detail = "non-Unicode native evidence; original JSON bytes retained as base64; target excluded"
+      observation = %*{"capture_errors": [detail],
+        "actual_scripted": sim.haveOrder[seat] and sim.orders[seat].source == osScripted,
+        "invalid_native_evidence_json_b64": encode($original)}
+      attempts = @[]
+      selected = none(string)
+      actual = newJNull()
+      status = asRejected
+      if capture.errors.len < 16: capture.errors.add(detail)
+    capture.trajectory.recordDecision($round & "-" & $seat, $seat, observation,
+      attempts, selected, actual, status, terminal = true,
+      fallbackOrigin = none(string))
 
 proc finishMatch*(capture: MatchCapture, sim: SimServer, destination: string) =
   let outcome = sim.resultsJson()
   var privateOutcome = copy(outcome)
-  var participants = newJArray()
-  for seat in 0 ..< SeatCount:
-    participants.add(%*{"seat": $seat, "score": outcome["scores"][seat], "win": outcome["win"][seat]})
+  var participants = newJNull()
+  if sim.reason != erError:
+    participants = newJArray()
+    for seat in 0 ..< SeatCount:
+      participants.add(%*{"seat": $seat, "score": outcome["scores"][seat], "win": outcome["win"][seat]})
   if not scalarJson(outcome):
     capture.failed = true
     capture.errors.add("non-Unicode native outcome; original JSON bytes retained as base64")
     privateOutcome = %*{"invalid_native_outcome_json_b64": encode($outcome)}
   if not scalarJson(participants): participants = newJNull()
-  if capture.failed: privateOutcome["capture_errors"] = %capture.errors
-  let status = if capture.failed: esFailed
+  if capture.failed and capture.errors.len > 0:
+    privateOutcome["capture_errors"] = %capture.errors
+  let status = if capture.failed or sim.reason == erError: esFailed
     else:
       case sim.reason
       of erComplete: esCompleted

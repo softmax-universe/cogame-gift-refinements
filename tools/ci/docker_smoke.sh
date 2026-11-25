@@ -161,12 +161,19 @@ with open(os.path.join(work, "config.json"), "w") as fh:
 
 by_id = {p.get("id"): p for p in (manifest.get("player") or [])}
 extra_env = [kv for kv in (os.environ.get("SMOKE_EXTRA_ENV") or "").split() if "=" in kv]
+has_llm = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("COWORLD_LLM_ENDPOINT"))
 
 for slot in range(seats):
     player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
     entry = by_id.get(player_id) or {}
+    entry_env = dict(entry.get("env") or {})
+    if not has_llm and str(entry_env.get("COWORLD_LLM_ENABLED", "")).lower() in ("1", "true", "yes") and "PLAYER_SCRIPTED" not in entry_env:
+        # Offline CI smoke has no model provider; run explicit scripted baselines instead of invoking an unconfigured LLM.
+        entry_env.pop("COWORLD_LLM_ENABLED", None)
+        entry_env.pop("COWORLD_LLM_MODEL", None)
+        entry_env["PLAYER_SCRIPTED"] = "reciprocator"
     env_args = []
-    for key, value in (entry.get("env") or {}).items():
+    for key, value in entry_env.items():
         env_args += ["-e", f"{key}={value}"]
     for kv in extra_env:
         env_args += ["-e", kv]

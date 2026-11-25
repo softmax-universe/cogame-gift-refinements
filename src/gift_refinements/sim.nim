@@ -28,11 +28,17 @@ type
     erComplete = "complete"
     erDeadline = "deadline"
     erForfeit = "forfeit"
+    erError = "error"
 
   EndEnding* = enum
     eeRoundLimit = "round_limit"
     eeDeadline = "deadline"
     eeForfeit = "forfeit"
+    eeError = "error"
+
+  EpisodeFailure* = object
+    round*, seat*, attempt*: int
+    cause*, category*, detail*: string
 
   CogPeer* = object
     ## One other cog as this seat sees it. Every field is public knowledge:
@@ -106,6 +112,7 @@ type
     finished*: bool
     reason*: EndReason
     ending*: EndEnding
+    failures*: seq[EpisodeFailure]
     hash*: uint64
     firstGiftTick*: int
     firstSuperTick*: int
@@ -492,9 +499,11 @@ proc finish*(sim: var SimServer, reason: EndReason) =
     of erComplete: eeRoundLimit
     of erDeadline: eeDeadline
     of erForfeit: eeForfeit
+    of erError: eeError
   var scores: seq[int] = @[]
-  for slot in 0 ..< SeatCount:
-    scores.add(sim.cogs[slot].score)
+  if reason != erError:
+    for slot in 0 ..< SeatCount:
+      scores.add(sim.cogs[slot].score)
   let terminal = max(0, sim.tick - 1)
   sim.emit(GiftEvent(
     kind: evEnd, t: terminal, reason: $reason, ending: $sim.ending,
@@ -602,7 +611,37 @@ proc seatView*(sim: SimServer, slot: int): SeatView =
 proc resultsJson*(sim: SimServer): JsonNode =
   ## The `results.json` document. `names` are POLICY names (platform side);
   ## the aliases the seats saw ride alongside and into the replay's `names[]`.
-  ## Arrays are indexed by slot and always length 6.
+  ## Unfinished error episodes are unscored and emit failure diagnostics with
+  ## no authoritative gameplay scores or winners.
+  if sim.reason == erError:
+    var failures = newJArray()
+    for failure in sim.failures:
+      failures.add(%*{
+        "round": failure.round,
+        "seat": failure.seat,
+        "alias": (if failure.seat >= 0 and failure.seat < sim.aliases.len:
+                    sim.aliases[failure.seat] else: ""),
+        "attempt": failure.attempt,
+        "cause": failure.cause,
+        "category": failure.category,
+        "detail": failure.detail
+      })
+    let
+      primaryCause =
+        if sim.failures.len > 0: sim.failures[0].cause else: "episode_error"
+      primaryCategory =
+        if sim.failures.len > 0: sim.failures[0].category else: "infrastructure"
+    return %*{
+      "names": sim.policyNames,
+      "aliases": sim.aliases,
+      "rounds": sim.round,
+      "reason": $sim.reason,
+      "ending": $sim.ending,
+      "scored": false,
+      "failure_cause": primaryCause,
+      "failure_category": primaryCategory,
+      "failures": failures
+    }
   var
     scores, collected, giftsSent, giftsReceived: seq[int] = @[]
     tokensGiven, tokensReceived: seq[int] = @[]

@@ -56,9 +56,10 @@ type
     seats*: array[SeatCount, SeatPolicy]
     lastBatchStart*: MonoTime
     batchStarted*: bool
-    llmOff*: bool              ## the budget guard fired; scripted from here on
+    llmOff*: bool              ## the budget guard fired; LLM calls cannot proceed
     fallbacks*: int
     llmOrders*: int
+    roundFailures*: seq[EpisodeFailure]
     captureEnabled*: bool
     decisions*: array[SeatCount, RoundDecision]
 
@@ -212,37 +213,12 @@ proc strictRawObject(text: string): JsonNode =
     raise newException(ValueError, "one raw JSON object required")
 
 proc strictNativeObject(text: string): JsonNode =
-  ## Select exactly the first span the native extractor can parse, including its fallback.
-  ## A strict rejection of that span must never select a later object instead.
+  ## Parse the single bare or outer-fenced JSON object strictly (RFC 8259 + UTF-8).
   if not scalarUtf8(text): raise newException(ValueError, "non-Unicode native completion")
-  var depth = 0
-  var start = -1
-  var inString, escaped = false
-  for index, character in text:
-    if inString:
-      if escaped: escaped = false
-      elif character == '\\': escaped = true
-      elif character == '"': inString = false
-      continue
-    case character
-    of '"': inString = true
-    of '{':
-      if depth == 0: start = index
-      inc depth
-    of '}':
-      if depth > 0:
-        dec depth
-        if depth == 0 and start >= 0:
-          var native: JsonNode
-          try: native = parseJson(text[start .. index])
-          except CatchableError: start = -1
-          if native != nil: return strictRawObject(text[start .. index])
-    else: discard
-  let first = text.find('{')
-  let last = text.rfind('}')
-  if first < 0 or last <= first: raise newException(ValueError, "no native object span")
-  discard parseJson(text[first .. last])
-  strictRawObject(text[first .. last])
+  let body = stripOuterJsonFence(text)
+  if body.len == 0 or body[0] != '{' or body[^1] != '}':
+    raise newException(ValueError, "no native object span")
+  strictRawObject(body)
 
 proc suppliedFieldsEqual(raw, applied: JsonNode): bool =
   ## Framing is source-supported; field/type/value repairs are separate exclusions.
@@ -518,7 +494,7 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
   lines.add("ROUND " & $view.round & " / " & $view.rounds & "   (tick " &
     $view.tick & " of " & $(view.rounds * view.ticksPerRound) & ")")
   lines.add("")
-  lines.add("YOU  " & view.alias.toUpperAscii() & "  at (" & $view.x & "," &
+  lines.add("YOU  " & view.alias & "  at (" & $view.x & "," &
     $view.y & ")")
   lines.add("  holding: " & $view.tokens[0] & " raw, " & $view.tokens[1] &
     " refined, " & $view.tokens[2] & " super  (" & $view.held & " tokens)")
@@ -531,7 +507,7 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
   lines.add("")
   lines.add("COGS  alias | cell | dist | hittable | score | you gave | gave you | net")
   for peer in view.peers:
-    lines.add("  " & peer.alias.toUpperAscii() & " | (" & $peer.x & "," &
+    lines.add("  " & peer.alias & " | (" & $peer.x & "," &
       $peer.y & ") | " & $peer.dist & " | " &
       (if peer.hittable: "YES " & peer.dir else: "no") & " | " & $peer.score &
       " | " & $peer.youGave & " | " & $peer.gaveYou & " | " & $peer.net)
@@ -550,14 +526,14 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
     lines.add("GIFT LEDGER (whole board, most recent last)")
     for row in view.ledgerTail:
       lines.add("  r" & $row.r & "  " &
-        scene.names[row.fromSeat].toUpperAscii() & " \u2192 " &
-        scene.names[row.toSeat].toUpperAscii() & "  " & LevelNames[row.sent] &
+        scene.names[row.fromSeat] & " \u2192 " &
+        scene.names[row.toSeat] & "  " & LevelNames[row.sent] &
         " \u2192 " & $row.n & " " & LevelNames[row.got])
   lines.add("")
   if view.bankTail.len > 0:
     lines.add("BANK TAPE")
     for row in view.bankTail:
-      lines.add("  r" & $row.r & "  " & scene.names[row.seat].toUpperAscii() &
+      lines.add("  r" & $row.r & "  " & scene.names[row.seat] &
         " banked " & $row.n)
     lines.add("")
   if view.history.len > 0:
@@ -584,11 +560,46 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
 #  Fallback + guard records
 # ---------------------------------------------------------------------------
 
-proc fallbackRecord*(round, seat, attempt: int, cause, detail: string): string =
+proc failureRecord*(
+  round, seat, attempt: int, cause, category, detail: string
+): string =
   $(%*{
-    "k": "fallback", "round": round, "seat": seat, "attempt": attempt,
-    "cause": cause, "detail": detail.cleanText(MaxFallbackDetailRunes)
+    "k": "decision_failure", "round": round, "seat": seat, "attempt": attempt,
+    "cause": cause, "category": category,
+    "detail": detail.cleanText(MaxFallbackDetailRunes)
   })
+
+proc classifyDecisionError*(
+  error: ref CatchableError, transportError: string
+): tuple[cause, category: string] =
+  ## Separates infrastructure/provider/transport failures from model-generated
+  ## unparseable or schema-invalid actions.
+  if transportError.len > 0:
+    let lower = transportError.toLowerAscii()
+    if "timeout" in lower or "timed out" in lower:
+      return ("timeout", "infrastructure")
+    return ("transport_error", "infrastructure")
+  if error of LlmError:
+    if error.msg.startsWith("llm auth failed") or
+        error.msg.startsWith("bedrock model access denied"):
+      return ("auth_error", "infrastructure")
+    if error.msg.startsWith("llm throttled"):
+      return ("throttled", "infrastructure")
+    if error.msg.startsWith("anthropic refusal"):
+      return ("provider_refusal", "infrastructure")
+    if error.msg.startsWith("reply cut off at max_tokens"):
+      return ("max_tokens", "invalid_action")
+    return ("provider_error", "infrastructure")
+  if error of OrderError:
+    if error.msg.startsWith("reply must be one JSON object") or
+        error.msg.startsWith("invalid JSON object") or
+        error.msg.startsWith("unterminated markdown fence") or
+        error.msg.startsWith("unsupported markdown fence") or
+        error.msg.startsWith("malformed closing markdown fence") or
+        error.msg.startsWith("reply is not a JSON object"):
+      return ("parse_error", "invalid_action")
+    return ("invalid_action", "invalid_action")
+  ("provider_error", "infrastructure")
 
 proc budgetGuardRecord*(round, remainingSeconds: int): string =
   $(%*{"k": "budget_guard", "round": round, "remaining_s": remainingSeconds})
@@ -606,31 +617,16 @@ proc registerRecord*(seat: int, policy, kind, baseline: string): string =
 #  The turn
 # ---------------------------------------------------------------------------
 
-const RetryHint = "\n\nYour previous reply was invalid. Respond with ONLY the " &
+proc retryHint*(maxBeams: int): string =
+  "\n\nYour previous reply was invalid. Respond with ONLY the " &
   "requested JSON object, using one of the listed job values, one of the " &
-  "listed target aliases, a gift count between 0 and 10, and one of " &
+  "listed target aliases, a gift count between 0 and " & $maxBeams & ", and one of " &
   "now/end/never."
 
 proc scriptedFor*(
   engine: DecisionEngine, sim: SimServer, seat: int, kind: Baseline
 ): Order =
   scriptedOrder(kind, sim.seatView(seat), sim.config.maxBeamsPerRound)
-
-proc holdFallbackOrder*(): Order =
-  ## Neutral hold order for scored LLM failures (never runs `reciprocatorOrder`).
-  Order(job: jobHold, target: -1, gift: 0, consume: cwNever, source: osFallback)
-
-proc repairMissingOrders*(engine: DecisionEngine, sim: var SimServer) =
-  ## Ensure every seat has an order: neutral hold for LLM seats, `reciprocator`
-  ## for unregistered scripted seats.
-  for seat in 0 ..< SeatCount:
-    if not sim.haveOrder[seat]:
-      var order =
-        if engine.seats[seat].isLlm: holdFallbackOrder()
-        else: reciprocatorOrder(sim.seatView(seat), sim.config.maxBeamsPerRound)
-      order.source = osFallback
-      sim.orders[seat] = order
-      sim.haveOrder[seat] = true
 
 proc installOrder*(sim: var SimServer, seat: int, order: Order) =
   sim.orders[seat] = order
@@ -641,8 +637,10 @@ proc turn*(
   sim: var SimServer,
   roundIndex, elapsedSeconds: int
 ): seq[string] =
-  ## Runs ONE decision round and installs each seat's standing order. Returns
-  ## the log records this round produced. NEVER RAISES.
+  ## Runs ONE decision round and installs each seat's standing order. Never
+  ## substitutes fake moves for failed/unavailable LLM decisions: any failed
+  ## LLM seat is recorded in `engine.roundFailures` with `sim.haveOrder[seat] = false`.
+  engine.roundFailures = @[]
   let
     budget = initDuration(milliseconds = max(1, sim.config.turnBudgetMs))
     turnStart = getMonoTime()
@@ -661,30 +659,44 @@ proc turn*(
   ## and only suppresses this round's retry.
   engine.client.throttled = false
 
-  # --- budget guard: settle EARLY rather than overrun -----------------------
+  # --- budget guard: fail cleanly rather than overrun or fake moves ----------
   if not engine.llmOff:
     let roundSeconds = (sim.config.turnBudgetMs + 999) div 1000
     if elapsedSeconds + 2 * roundSeconds > sim.config.playDeadlineSeconds():
       engine.llmOff = true
       result.add(budgetGuardRecord(roundIndex,
         max(0, sim.config.playDeadlineSeconds() - elapsedSeconds)))
-      echo "gift-refinements: budget guard fired at round ", roundIndex,
-        "; the remaining rounds play scripted"
+      echo "gift-refinements: budget guard fired at round ", roundIndex
 
   # --- which seats need a call? --------------------------------------------
   var open: seq[int] = @[]
   for seat in 0 ..< SeatCount:
-    if engine.seats[seat].isLlm and not engine.llmOff and
+    if engine.seats[seat].isExternal:
+      sim.haveOrder[seat] = false
+    elif engine.seats[seat].isLlm and not engine.llmOff and
         not engine.client.disabled:
+      sim.haveOrder[seat] = false
       open.add(seat)
     elif engine.seats[seat].isLlm:
-      sim.installOrder(seat, holdFallbackOrder())
+      sim.haveOrder[seat] = false
       engine.fallbacks += 1
-      let cause = if engine.llmOff: "budget_guard" else: "no_credentials"
-      result.add(fallbackRecord(roundIndex, seat, 1, cause,
-        "the LLM is unavailable for this round; holding position"))
-      echo LogPrefix, "seat ", seat, " falling back to neutral hold (",
-        cause, ") on round ", roundIndex
+      let cause =
+        if engine.llmOff: "budget_guard"
+        elif engine.client.transport == ltNone: "no_credentials"
+        else: "auth_error"
+      let detail =
+        if engine.llmOff: "per-episode play budget exhausted before LLM decision"
+        elif engine.client.transport == ltNone: "LLM provider credentials are not configured"
+        else: "LLM provider authentication failed"
+      engine.roundFailures.add(EpisodeFailure(
+        round: roundIndex, seat: seat, attempt: 1,
+        cause: cause, category: "infrastructure",
+        detail: detail.cleanText(MaxFallbackDetailRunes)))
+      result.add(failureRecord(roundIndex, seat, 1, cause, "infrastructure", detail))
+      if engine.captureEnabled:
+        engine.decisions[seat].status = asMissing
+      echo LogPrefix, "seat ", seat, " decision failed (infrastructure/",
+        cause, ") on round ", roundIndex, ": ", detail
     else:
       var order = engine.scriptedFor(sim, seat, engine.seats[seat].baseline)
       order.source = osScripted
@@ -712,13 +724,21 @@ proc turn*(
 
   # --- up to two PARALLEL batches ------------------------------------------
   var attempt = 0
+  var lastFailure: array[SeatCount, EpisodeFailure]
+  var hasFailure: array[SeatCount, bool]
   while open.len > 0 and attempt < 2:
     if engine.client.disabled:
       break
     if getMonoTime() - turnStart >= budget:
       for seat in open:
-        result.add(fallbackRecord(roundIndex, seat, attempt + 1, "timeout",
-          "per-round budget exhausted before attempt " & $(attempt + 1)))
+        let detail = "per-round budget exhausted before attempt " & $(attempt + 1)
+        lastFailure[seat] = EpisodeFailure(
+          round: roundIndex, seat: seat, attempt: attempt + 1,
+          cause: "timeout", category: "infrastructure",
+          detail: detail.cleanText(MaxFallbackDetailRunes))
+        hasFailure[seat] = true
+        result.add(failureRecord(roundIndex, seat, attempt + 1,
+          "timeout", "infrastructure", detail))
       break
     let deadlineMs =
       if attempt == 0: sim.config.attempt1Ms else: sim.config.retryMs
@@ -729,7 +749,7 @@ proc turn*(
       let view = sim.seatView(seat)
       var user = userPrompt(view, scene, engine.seats[seat].prompt)
       if attempt > 0:
-        user.add(RetryHint)
+        user.add(retryHint(sim.config.maxBeamsPerRound))
       let request = engine.client.requestFor(systemPrompt(view, scene, engine.selection), user, seat)
       batch.post(request.url, request.headers, request.body, $seat)
       if engine.captureEnabled:
@@ -746,7 +766,6 @@ proc turn*(
     let latency = (getMonoTime() - started).inMilliseconds.int
     var stillOpen: seq[int] = @[]
     for position, seat in open:
-      var cause = "parse_error"
       var evidence: DecisionAttempt
       if engine.captureEnabled:
         evidence = newDecisionAttempt($roundIndex & "-" & $seat & "-" & $(attempt + 1),
@@ -821,17 +840,16 @@ proc turn*(
             engine.decisions[seat].status = asRejected
         engine.llmOrders += 1
       except CatchableError as error:
-        if responses[position].error.len > 0:
-          cause = (if "timeout" in responses[position].error.toLowerAscii():
-                     "timeout" else: "transport_error")
-        elif error.msg.startsWith("llm throttled"):
-          ## Name the throttle for what it is: reporting a 429 as a
-          ## `parse_error` is what made the hosted log unreadable.
-          cause = "throttled"
-        result.add(fallbackRecord(roundIndex, seat, attempt + 1, cause,
-          error.msg))
+        let classified = classifyDecisionError(error, responses[position].error)
+        lastFailure[seat] = EpisodeFailure(
+          round: roundIndex, seat: seat, attempt: attempt + 1,
+          cause: classified.cause, category: classified.category,
+          detail: error.msg.cleanText(MaxFallbackDetailRunes))
+        hasFailure[seat] = true
+        result.add(failureRecord(roundIndex, seat, attempt + 1,
+          classified.cause, classified.category, error.msg))
         echo LogPrefix, "seat ", seat, " attempt ", attempt + 1,
-          " failed, falling back if it fails again: ", error.msg
+          " failed (", classified.category, "/", classified.cause, "): ", error.msg
         if engine.captureEnabled:
           evidence.rejectionReason = some(safeDiagnostic(error.msg))
         stillOpen.add(seat)
@@ -839,35 +857,40 @@ proc turn*(
     open = stillOpen
     inc attempt
     if engine.client.throttled and open.len > 0:
-      # FAIL FAST. The only model left answered 429, so the retry batch would
-      # be refused the same way: spend the rest of the round on the scripted
-      # layer instead of on a call that cannot land.
       echo LogPrefix, "provider throttled with no other candidate; ",
-        open.len, " seat(s) fall back for round ", roundIndex
+        open.len, " seat(s) failed on round ", roundIndex
       break
 
-  # --- anything still open holds position (never plays scripted reciprocator)
+  # --- any seat still open has no valid decision: fail cleanly, no fake moves
   for seat in open:
-    sim.installOrder(seat, holdFallbackOrder())
+    sim.haveOrder[seat] = false
     engine.fallbacks += 1
-    let cause =
-      if engine.client.disabled or engine.client.transport == ltNone:
-        "no_credentials"
-      elif engine.llmOff: "budget_guard"
-      elif engine.client.throttled: "throttled"
-      else: "parse_error"
-    result.add(fallbackRecord(roundIndex, seat, 2, cause,
-      "seat fell back to neutral hold"))
-    ## "falling back" is the phrase phase 60 greps the GAME log for.
-    echo LogPrefix, "seat ", seat, " falling back to neutral hold (", cause,
-      ") on round ", roundIndex
+    let failure =
+      if hasFailure[seat]:
+        lastFailure[seat]
+      else:
+        let cause =
+          if engine.client.transport == ltNone: "no_credentials"
+          elif engine.client.disabled: "auth_error"
+          elif engine.llmOff: "budget_guard"
+          elif engine.client.throttled: "throttled"
+          else: "provider_error"
+        EpisodeFailure(
+          round: roundIndex, seat: seat, attempt: max(1, attempt),
+          cause: cause, category: "infrastructure",
+          detail: "LLM decision unavailable")
+    engine.roundFailures.add(failure)
+    result.add(failureRecord(roundIndex, seat, failure.attempt,
+      failure.cause, failure.category, failure.detail))
+    echo LogPrefix, "seat ", seat, " decision failed (", failure.category, "/",
+      failure.cause, ") on round ", roundIndex, ": ", failure.detail
+    if engine.captureEnabled:
+      engine.decisions[seat].status =
+        if failure.category == "invalid_action": asRejected else: asMissing
 
-  engine.repairMissingOrders(sim)
   if engine.captureEnabled:
     for seat in 0 ..< SeatCount:
-      if sim.orders[seat].source == osFallback:
-        engine.decisions[seat].status = asFallback
-      elif engine.decisions[seat].status != asRejected and
+      if sim.haveOrder[seat] and engine.decisions[seat].status != asRejected and
           engine.decisions[seat].selectedAttemptId.isNone:
         # External and scripted actions have no authenticated generation. Never label them model/teacher.
         engine.decisions[seat].status = asMissing

@@ -17,7 +17,7 @@
 ##
 ## The player protocol is `gift-refinements.player.v2`, JSON text frames.
 
-import ./prompts, ./training_capture
+import ./prompts, ./training_capture, ./decision_trajectory
 
 import
   std/[json, locks, monotimes, options, os, sets, strutils, tables, times]
@@ -71,7 +71,7 @@ type
     currentGlobalPacket: string
     currentGlobalViewer: GlobalViewerState
     pendingRegistrations: seq[tuple[slot: int, prompt, scripted: string,
-      external: bool, socket: WebSocket]]
+      llm, external: bool, socket: WebSocket]]
     decisionId: int
     pendingActions: seq[JsonNode]
     closed: seq[WebSocket]
@@ -222,15 +222,20 @@ proc websocketHandler(
         case payload{"type"}.getStr()
         of "prompt":
           appState.pendingRegistrations.add((slot,
-            payload{"prompt"}.getStr(), payload{"scripted"}.getStr(), false, websocket))
+            payload{"prompt"}.getStr(), payload{"scripted"}.getStr(),
+            payload{"llm"}.getBool(false), false, websocket))
         of "register":
-          if payload["control"].getStr() != "external":
+          if payload{"control"}.getStr() != "external":
             return
-          appState.pendingRegistrations.add((slot, "", "", true, websocket))
+          appState.pendingRegistrations.add((slot, "", "", false, true, websocket))
         of "action":
-          if payload["id"].getInt() == appState.decisionId and
+          let idNode = payload{"id"}
+          let actionNode = payload{"action"}
+          if not idNode.isNil and idNode.kind == JInt and
+              idNode.getInt() == appState.decisionId and
               appState.pendingActions[slot].isNil:
-            appState.pendingActions[slot] = payload["action"]
+            appState.pendingActions[slot] =
+              if actionNode.isNil: newJNull() else: actionNode
         else:
           echo "gift-refinements: seat ", slot, " sent an unknown frame kind"
   of ErrorEvent, CloseEvent:
@@ -355,14 +360,21 @@ proc drainRegistrations(engine: var DecisionEngine): int =
           engine.seats[item.slot].isExternal = true
           engine.seats[item.slot].label = "external"
           engine.seats[item.slot].baseline = blReciprocator
-        elif item.prompt.len > 0:
+        elif item.prompt.len > 0 or item.llm:
           engine.seats[item.slot].isLlm = true
           engine.seats[item.slot].prompt = item.prompt
-          engine.seats[item.slot].label = "prompt"
+          engine.seats[item.slot].label =
+            if item.prompt.len > 0: "prompt" else: "llm"
           engine.seats[item.slot].baseline = blReciprocator
         else:
+          try:
+            engine.seats[item.slot].baseline = parseBaseline(item.scripted)
+          except ValueError as error:
+            engine.seats[item.slot].registered = false
+            echo "gift-refinements: seat ", item.slot, " rejected registration: ",
+              error.msg
+            continue
           engine.seats[item.slot].isLlm = false
-          engine.seats[item.slot].baseline = parseBaseline(item.scripted)
           engine.seats[item.slot].label = $engine.seats[item.slot].baseline
         echo registerRecord(item.slot, engine.seats[item.slot].label,
           engine.policyKind(item.slot),
@@ -389,6 +401,21 @@ proc welcomeJson(sim: SimServer, slot: int): JsonNode =
   }
 
 proc finalJson(sim: SimServer, slot: int): JsonNode =
+  if sim.reason == erError:
+    let results = sim.resultsJson()
+    return %*{
+      "type": "final",
+      "done": true,
+      "slot": slot,
+      "names": sim.aliases,
+      "rounds": sim.round,
+      "reason": $sim.reason,
+      "ending": $sim.ending,
+      "scored": false,
+      "failure_cause": results{"failure_cause"},
+      "failure_category": results{"failure_category"},
+      "failures": results{"failures"}
+    }
   var scores: seq[int] = @[]
   for i in 0 ..< SeatCount:
     scores.add(sim.cogs[i].score)
@@ -487,6 +514,7 @@ proc runEpisode*(
             "observation": observationJson(sim.seatView(slot), sim.scene())})
       for record in engine.turn(sim, roundIndex, elapsedSeconds()):
         echo "gift-refinements: ", record
+      var roundFailures = engine.roundFailures
       let deadline = decisionStart + initDuration(
         milliseconds = config.turnBudgetMs)
       while getMonoTime() < deadline:
@@ -495,6 +523,7 @@ proc runEpisode*(
           withLock appState.lock:
             for slot in seated:
               if engine.seats[slot].isExternal and
+                  slot in appState.slotSockets and
                   appState.pendingActions[slot].isNil:
                 ready = false
         if ready:
@@ -506,12 +535,50 @@ proc runEpisode*(
           {.gcsafe.}:
             withLock appState.lock:
               action = appState.pendingActions[slot]
-          if not action.isNil:
-            var order = parseOrder(action, slot, sim.aliases,
-              sim.config.maxBeamsPerRound)
-            order.source = osExternal
-            order.latencyMs = (getMonoTime() - decisionStart).inMilliseconds.int
-            sim.installOrder(slot, order)
+          if action.isNil:
+            sim.haveOrder[slot] = false
+            engine.fallbacks += 1
+            let detail = "external seat provided no action"
+            roundFailures.add(EpisodeFailure(
+              round: roundIndex, seat: slot, attempt: 1,
+              cause: "timeout", category: "infrastructure",
+              detail: detail))
+            echo "gift-refinements: ", failureRecord(
+              roundIndex, slot, 1, "timeout", "infrastructure", detail)
+            sendSeat(slot, %*{
+              "type": "error", "id": decisionId,
+              "reason": "timeout", "detail": detail})
+            if engine.captureEnabled:
+              engine.decisions[slot].status = asMissing
+          else:
+            try:
+              var order = parseOrder(action, slot, sim.aliases,
+                sim.config.maxBeamsPerRound)
+              order.source = osExternal
+              order.latencyMs = (getMonoTime() - decisionStart).inMilliseconds.int
+              sim.installOrder(slot, order)
+              if engine.captureEnabled:
+                engine.decisions[slot].status = asMissing
+            except OrderError as error:
+              sim.haveOrder[slot] = false
+              engine.fallbacks += 1
+              roundFailures.add(EpisodeFailure(
+                round: roundIndex, seat: slot, attempt: 1,
+                cause: "invalid_action", category: "invalid_action",
+                detail: error.msg.cleanText(MaxFallbackDetailRunes)))
+              echo "gift-refinements: ", failureRecord(
+                roundIndex, slot, 1, "invalid_action", "invalid_action", error.msg)
+              sendSeat(slot, %*{
+                "type": "error", "id": decisionId,
+                "reason": "invalid_action", "detail": error.msg})
+              if engine.captureEnabled:
+                engine.decisions[slot].status = asRejected
+      if roundFailures.len > 0:
+        sim.failures.add(roundFailures)
+        reason = erError
+        if capture.isSome:
+          capture.get().recordFailedRound(engine, sim, roundIndex)
+        break
       let elapsed = (getMonoTime() - decisionStart).inMilliseconds.int
       if config.minTurnSeconds * 1000 > elapsed:
         sleep(config.minTurnSeconds * 1000 - elapsed)
@@ -570,6 +637,14 @@ proc runEpisode*(
       "COGAME_RESULTS_URI")
   except CatchableError as error:
     echo "gift-refinements: results write failed: ", error.msg
+  if sim.reason == erError:
+    let failureUri = getEnv("COGAME_PLAYER_FAILURE_URI").strip()
+    if failureUri.len > 0:
+      try:
+        writeCogameUri(failureUri, $results, "application/json",
+          "COGAME_PLAYER_FAILURE_URI")
+      except CatchableError as error:
+        echo "gift-refinements: failure artifact write failed: ", error.msg
   try:
     writeCogameUri(runtime.replayUri, replayBytes(sim), "application/json",
       "COGAME_SAVE_REPLAY_URI")
