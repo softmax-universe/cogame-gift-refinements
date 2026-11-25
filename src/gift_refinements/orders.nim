@@ -205,21 +205,13 @@ proc parseOrder*(
   if not sayNode.isNil and sayNode.kind != JNull:
     if sayNode.kind != JString:
       raise newException(OrderError, "say must be a string or null")
-    let say = sayNode.getStr()
-    if say.runeLen > MaxSayRunes:
-      raise newException(OrderError,
-        "say exceeds " & $MaxSayRunes & " characters")
-    result.say = say
+    result.say = sayNode.getStr().truncateRunes(MaxSayRunes)
 
   let notesNode = payload{"notes"}
   if not notesNode.isNil and notesNode.kind != JNull:
     if notesNode.kind != JString:
       raise newException(OrderError, "notes must be a string or null")
-    let notes = notesNode.getStr()
-    if notes.runeLen > MaxNotesRunes:
-      raise newException(OrderError,
-        "notes exceeds " & $MaxNotesRunes & " characters")
-    result.notes = notes
+    result.notes = notesNode.getStr().truncateRunes(MaxNotesRunes)
 
 proc targetAlias*(order: Order, aliases: openArray[string]): string =
   if order.target < 0 or order.target >= aliases.len: "" else: aliases[order.target]

@@ -97,10 +97,11 @@ block schemaRejects:
     "a non-string say was accepted")
   rejects("""{"job":"hold","notes":[]}""",
     "a non-string notes was accepted")
-  rejects("""{"job":"hold","say":"""" & "x".repeat(MaxSayRunes + 1) & """"}""",
-    "an over-length say was accepted")
-  rejects("""{"job":"hold","notes":"""" & "y".repeat(MaxNotesRunes + 1) & """"}""",
-    "an over-length notes was accepted")
+  let longText = parses($(%*{"job":"hold", "say":"x".repeat(MaxSayRunes + 1),
+    "notes":"y".repeat(MaxNotesRunes + 1)}))
+  check(longText.job == jobHold and longText.say == "x".repeat(MaxSayRunes) and
+    longText.notes == "y".repeat(MaxNotesRunes),
+    "optional text must not invalidate the chosen action")
   banner "every invalid, coerced, out-of-range, legacy, or extra-field reply raises"
 
 block schemaValidDefaultsAndExactFields:
@@ -356,17 +357,16 @@ block classifyErrorDistinguishesInfraFromInvalidAction:
   banner "classifyDecisionError distinguishes infrastructure failures from model invalid_action/parse_error"
 
 block parseBaselineRejectsAliasesAndUnknowns:
-  check(parseBaseline("") == blReciprocator, "empty baseline did not default to reciprocator")
   check(parseBaseline("reciprocator") == blReciprocator, "reciprocator did not parse")
   check(parseBaseline("hoarder") == blHoarder, "hoarder did not parse")
-  for bad in ["hoard", "HOARDER", "leech", "unknown"]:
+  for bad in ["", "hoard", "HOARDER", "leech", "unknown"]:
     var raised = false
     try:
       discard parseBaseline(bad)
     except ValueError:
       raised = true
     check(raised, "legacy or unknown baseline was accepted: " & bad)
-  banner "parseBaseline accepts only empty/reciprocator/hoarder"
+  banner "parseBaseline accepts only reciprocator/hoarder"
 
 block promptsCarryTheContract:
   let sim = initSimServer(defaultGameConfig())
