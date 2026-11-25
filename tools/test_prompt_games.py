@@ -103,6 +103,11 @@ def play(
             response_text = json.dumps(action)
             if private and index == 0:
                 response_text = "```json\n" + response_text + "\n```"
+            elif private and index == 1:
+                response_text = (
+                    'I need to analyze this strategically; quoting {"job":"hold"}.\n\n'
+                    "```json\n" + response_text + "\n```"
+                )
             result = request(
                 {"kind": "step", "decision_id": index, "response": response_text}
             )
