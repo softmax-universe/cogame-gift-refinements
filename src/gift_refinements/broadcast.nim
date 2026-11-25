@@ -261,7 +261,7 @@ proc overJson*(
     "minted": tracker.minted,
     "banked": tracker.tokensBanked,
     "defections": tracker.defections,
-    "collected": results{"collected"},
+    "collected": (if results{"collected"}.isNil: newJArray() else: results{"collected"}),
     "teams": {"gifts": {"lives": tracker.giftsGiven},
               "banked": {"lives": tracker.tokensBanked}},
     "t": tick

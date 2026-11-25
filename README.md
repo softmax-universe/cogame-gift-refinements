@@ -35,13 +35,15 @@ coworld upload-policy coworld-gift-refinements:latest \
   --secret-env USE_BEDROCK=true
 ```
 
-`PLAYER_SCRIPTED=reciprocator|hoarder` fields a published baseline instead. A seat
-that sets neither plays `reciprocator`.
+`PLAYER_SCRIPTED=reciprocator|hoarder` fields a published baseline instead. Setting
+`COWORLD_LLM_ENABLED=true` (the default on the manifest's `gift-refinements-player`
+entry) or `PLAYER_PROMPT` runs the seat through the game-hosted model endpoint.
 
 External players receive seat-private observations and submit ordinary collect,
 hold, evade, meet, and gift orders. The game validates them strictly through its
-normal action path; missing or invalid external actions receive an `error` frame
-and hold position (no-op) for that round.
+normal action path; missing or invalid actions (LLM or external) or unavailable
+model providers never substitute fake moves — they emit failure diagnostics and
+terminate the unfinished episode unscored (`reason: "error"`).
 
 Once per round (60 ticks), the game sends external policies their seat-private
 observations and accepts ordinary standing orders. Prompt seats still share

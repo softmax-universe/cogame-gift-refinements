@@ -18,7 +18,10 @@
       "type": "game",
       "image": "{{GIFT_REFINEMENTS_IMAGE}}",
       "run": ["/bin/gift-refinements"],
-      "env": {},
+      "env": {
+        "COWORLD_LLM_ENABLED": "true",
+        "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5"
+      },
       "source_url": "https://github.com/softmax-universe/cogame-gift-refinements/tree/main"
     },
     "replay_viewer": {
@@ -43,7 +46,7 @@
           "title": "Fielding a policy",
           "content": {
             "type": "text",
-            "value": "A POLICY IS A PROMPT. Every seat runs the same image. Set PLAYER_PROMPT to a strategy in plain English and the seat becomes an LLM seat; set PLAYER_SCRIPTED=reciprocator|hoarder and it plays that published baseline. A seat that sets neither plays reciprocator.\n\n  coworld upload-policy <image> --name my-gift-policy \\\n    --run /bin/gift-refinements-player \\\n    --secret-env PLAYER_PROMPT=\"<your strategy>\" \\\n    --secret-env USE_BEDROCK=true\n\nTHE CADENCE. You do not steer tick by tick. Once per round (60 ticks) the game sends your seat the observation below and asks for ONE standing order; a deterministic kernel walks and beams it for you for the next 60 ticks. All six seats are asked at the same moment, in one parallel batch.\n\nTHE ORDER, exactly one JSON object (bare or inside a single outer Markdown code fence):\n  job      \"collect\" | \"meet\" | \"hold\" | \"evade\"   (required)\n  target   one of the five OTHER cog aliases (exact case), or null; required\n           when job is \"meet\" or gift > 0\n  gift     integer 0..10, beams to fire at target this round (absent/null = 0)\n  consume  \"now\" | \"end\" | \"never\"   (absent/null = \"end\")\n  say      <= 80 characters. SPECTATOR-ONLY: it is drawn in the viewer feed\n           and recorded in the replay, and is NEVER delivered to another seat.\n  notes    <= 320 characters, private to you, handed back next round.\nSurrounding prose, extra objects, unexpected fields, type coercions, out-of-range\ngift counts, or over-length strings are rejected. A rejected LLM reply is retried\nonce and then the seat holds position (no-op) for that round.\n\nTHE OBSERVATION. Your cell, your three token counts, your lowest held level,\nyour score, your beam budget and your last order; for EVERY other cog its\nalias, cell, distance, whether it is hittable right now and in which\ndirection, its score, the running youGave / gaveYou / net counts between you\nand it, the round it last gave to you and what it banked last round; every\nloose raw token; the global gift ledger (last 16 gifts) and bank tape (last 8\nconsumes); your own per-round history; your notes; and the full rule block.\nHIDDEN: every other cog's INVENTORY, its order, its notes, its prompt and its\npolicy name. You know what somebody banked. You do not know what they are\nholding."
+            "value": "A POLICY IS A MODEL OR PROMPT. Every seat runs the same image. Set COWORLD_LLM_ENABLED=true (and optionally PLAYER_PROMPT to a strategy in plain English) and the seat becomes an LLM seat driven by the game-hosted model endpoint; set PLAYER_SCRIPTED=reciprocator|hoarder and it plays that published baseline.\n\n  coworld upload-policy <image> --name my-gift-policy \\\n    --run /bin/gift-refinements-player \\\n    --secret-env PLAYER_PROMPT=\"<your strategy>\" \\\n    --secret-env COWORLD_LLM_ENABLED=true\n\nTHE CADENCE. You do not steer tick by tick. Once per round (60 ticks) the game sends your seat the observation below and asks for ONE standing order; a deterministic kernel walks and beams it for you for the next 60 ticks. All six seats are asked at the same moment, in one parallel batch.\n\nTHE ORDER, exactly one JSON object (bare or inside a single outer Markdown code fence):\n  job      \"collect\" | \"meet\" | \"hold\" | \"evade\"   (required)\n  target   one of the five OTHER cog aliases (exact case), or null; required\n           when job is \"meet\" or gift > 0\n  gift     integer 0..10, beams to fire at target this round (absent/null = 0)\n  consume  \"now\" | \"end\" | \"never\"   (absent/null = \"end\")\n  say      <= 80 characters. SPECTATOR-ONLY: it is drawn in the viewer feed\n           and recorded in the replay, and is NEVER delivered to another seat.\n  notes    <= 320 characters, private to you, handed back next round.\nSurrounding prose, extra objects, unexpected fields, type coercions, out-of-range\ngift counts, or over-length strings are rejected. A rejected LLM reply is retried\nonce; if a seat still fails to produce a valid decision (or the model provider is\nunavailable), no fake move is substituted and the episode terminates unscored with\nfailure diagnostics.\n\nTHE OBSERVATION. Your cell, your three token counts, your lowest held level,\nyour score, your beam budget and your last order; for EVERY other cog its\nalias, cell, distance, whether it is hittable right now and in which\ndirection, its score, the running youGave / gaveYou / net counts between you\nand it, the round it last gave to you and what it banked last round; every\nloose raw token; the global gift ledger (last 16 gifts) and bank tape (last 8\nconsumes); your own per-round history; your notes; and the full rule block.\nHIDDEN: every other cog's INVENTORY, its order, its notes, its prompt and its\npolicy name. You know what somebody banked. You do not know what they are\nholding."
           }
         }
       ]
@@ -51,7 +54,7 @@
     "protocols": {
       "player": {
         "type": "text",
-        "value": "gift-refinements.player.v2. JSON text frames over the seat WebSocket. The game sends welcome, seat-private state, error (on rejected or timed-out external actions), and final frames. A prompt or scripted player sends {\"type\":\"prompt\",\"prompt\":str,\"scripted\":str}. Any external policy sends {\"type\":\"register\",\"control\":\"external\"}, receives {\"type\":\"observation\",\"id\":int,\"observation\":{seat-private state}}, and replies {\"type\":\"action\",\"id\":int,\"action\":{job,target,gift,consume,say,notes}}. The game validates the standing order strictly through the same action schema used by prompt policies. Missing or invalid external actions receive an error frame and hold position (no-op) for that round."
+        "value": "gift-refinements.player.v2. JSON text frames over the seat WebSocket. The game sends welcome, seat-private state, error (on rejected or timed-out external actions), and final frames. A model or scripted player sends {\"type\":\"prompt\",\"prompt\":str,\"scripted\":str,\"llm\":bool}. Any external policy sends {\"type\":\"register\",\"control\":\"external\"}, receives {\"type\":\"observation\",\"id\":int,\"observation\":{seat-private state}}, and replies {\"type\":\"action\",\"id\":int,\"action\":{job,target,gift,consume,say,notes}}. The game validates the standing order strictly through the same action schema used by prompt policies. Missing or invalid external actions receive an error frame and terminate the unfinished episode unscored with failure diagnostics."
       },
       "global": {
         "type": "text",
@@ -131,21 +134,34 @@
         "total_gifts": {"type": "integer"},
         "total_minted": {"type": "integer"},
         "rounds": {"type": "integer"},
-        "reason": {"type": "string", "enum": ["complete", "deadline", "forfeit"]},
-        "ending": {"type": "string", "enum": ["round_limit", "deadline", "forfeit"]}
+        "scored": {"type": "boolean"},
+        "failure_cause": {"type": "string"},
+        "failure_category": {"type": "string", "enum": ["infrastructure", "invalid_action"]},
+        "failures": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 36,
+          "items": {"type": "object"}
+        },
+        "reason": {"type": "string", "enum": ["complete", "deadline", "forfeit", "error"]},
+        "ending": {"type": "string", "enum": ["round_limit", "deadline", "forfeit", "error"]}
       },
-      "required": ["names", "scores", "reason", "ending"]
+      "required": ["names", "reason", "ending"]
     }
   },
   "player": [
     {
       "id": "gift-refinements-player",
       "type": "player",
-      "name": "Gift Refinements policy seat",
-      "description": "A prompt policy. PLAYER_PROMPT is supplied at upload time; with none set the seat plays the reciprocator baseline.",
+      "name": "Gift Refinements native model policy",
+      "description": "Native LLM policy seat driven by the game-hosted model endpoint. Set PLAYER_PROMPT to customize strategy; without PLAYER_SCRIPTED it invokes the configured LLM.",
       "image": "{{GIFT_REFINEMENTS_IMAGE}}",
       "source_url": "https://github.com/softmax-universe/cogame-gift-refinements/tree/main",
-      "run": ["/bin/gift-refinements-player"]
+      "run": ["/bin/gift-refinements-player"],
+      "env": {
+        "COWORLD_LLM_ENABLED": "true",
+        "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5"
+      }
     },
     {
       "id": "gift-refinements-reciprocator",

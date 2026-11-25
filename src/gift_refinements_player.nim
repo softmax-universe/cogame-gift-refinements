@@ -31,11 +31,11 @@ const
   ResendEveryMs = 2000
   ReconnectAttempts = 6
 
-proc registrationFrame(prompt, scripted: string): string =
-  ## The one registration message. `scripted` is an empty string when the seat
-  ## is an LLM seat, so the game can tell "no baseline named" from
-  ## "reciprocator named explicitly".
-  $ %*{"type": "prompt", "prompt": prompt, "scripted": scripted}
+proc registrationFrame(prompt, scripted: string, llm: bool): string =
+  ## The one registration message. `llm: true` explicitly requests game-hosted
+  ## LLM inference even when `PLAYER_PROMPT` is empty; `scripted` names an
+  ## explicit scripted baseline.
+  $ %*{"type": "prompt", "prompt": prompt, "scripted": scripted, "llm": llm}
 
 when isMainModule:
   let url = getEnv("COWORLD_PLAYER_WS_URL", getEnv("COGAMES_ENGINE_WS_URL"))
@@ -44,20 +44,24 @@ when isMainModule:
   let
     prompt = getEnv("PLAYER_PROMPT").strip()
     scripted = getEnv("PLAYER_SCRIPTED").strip()
+    llmEnabled = getEnv("COWORLD_LLM_ENABLED").strip().toLowerAscii() in
+      ["1", "true", "yes"]
   if prompt.len == 0 and scripted.len > 0 and
       scripted notin ["reciprocator", "hoarder"]:
     quit("unknown PLAYER_SCRIPTED baseline: " & scripted &
       " (expected reciprocator|hoarder)", 1)
+  let useLlm = prompt.len > 0 or (scripted.len == 0 and llmEnabled)
   let
     label = block:
       let explicit = getEnv("PLAYER_POLICY_LABEL").strip()
       if explicit.len > 0: explicit
       elif prompt.len > 0: "prompt"
+      elif useLlm: "llm"
       elif scripted.len > 0: scripted
       else: "reciprocator"
   echo "gift-refinements player: kind=",
-    (if prompt.len > 0: "llm" else: "scripted"),
-    " baseline=", (if scripted.len > 0: scripted else: "reciprocator"),
+    (if useLlm: "llm" else: "scripted"),
+    " baseline=", (if useLlm: "none" elif scripted.len > 0: scripted else: "reciprocator"),
     " label=", label
 
   proc dial(attempts: int): WebSocket =
@@ -101,7 +105,7 @@ when isMainModule:
       lastResend = 0.0
       done = false
     try:
-      socket.send(registrationFrame(prompt, scripted), TextMessage)
+      socket.send(registrationFrame(prompt, scripted, useLlm), TextMessage)
       while true:
         let received = socket.receiveMessage(200)
         if resends < RegistrationResends:
@@ -109,7 +113,7 @@ when isMainModule:
           if lastResend >= float(ResendEveryMs):
             lastResend = 0.0
             inc resends
-            socket.send(registrationFrame(prompt, scripted), TextMessage)
+            socket.send(registrationFrame(prompt, scripted, useLlm), TextMessage)
         if received.isNone:
           continue                  ## a read timeout, not a closed socket
         inc frames
@@ -128,7 +132,7 @@ when isMainModule:
           echo "gift-refinements player: seated as ",
             payload{"name"}.getStr(), " (slot ", payload{"slot"}.getInt(), ")"
           resends = 0               ## keep re-sending across the admission race
-          socket.send(registrationFrame(prompt, scripted), TextMessage)
+          socket.send(registrationFrame(prompt, scripted, useLlm), TextMessage)
         of "state":
           discard
         of "final":

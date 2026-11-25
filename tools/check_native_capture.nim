@@ -81,8 +81,6 @@ for round in 1 .. config.rounds:
       order = parseOrder(extractJsonObject(selected["response"].getStr()), seat,
         game.aliases, config.maxBeamsPerRound)
       order.source = if selected["attempt_id"].getStr().endsWith("-2"): osRetry else: osLlm
-    elif row["action_status"].getStr() == "fallback":
-      order = holdFallbackOrder()
     else:
       order = scriptedOrder(blReciprocator, game.seatView(seat), config.maxBeamsPerRound)
     doAssert order.orderJson(game.aliases) == row["executed_action"]

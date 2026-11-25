@@ -273,10 +273,10 @@ block oneBatchCarriesEveryOpenSeat:
   check(retry.len == 2, "the retry batch must carry ONLY the failed seats")
   banner "one batch of six on round one; the retry batch carries only the failures"
 
-block offlineTurnFallsBackWithoutRaising:
+block offlineTurnFailsCleanlyWithoutSubstitutingMoves:
   ## With NO credentials the client disables itself instantly and every LLM
-  ## seat plays the reciprocator order, marked `fallback`. This is the path
-  ## offline certification and docker-smoke run, so it must be fast and silent.
+  ## seat fails cleanly with `no_credentials` (`infrastructure`) and NO fake
+  ## move is installed; scripted seats still get their scripted orders.
   var config = defaultGameConfig()
   config.minTurnSeconds = 0
   var sim = initSimServer(config)
@@ -294,49 +294,66 @@ block offlineTurnFallsBackWithoutRaising:
   let elapsed = (getMonoTime() - started).inMilliseconds.int
   check(elapsed < 2000,
     "an offline turn took " & $elapsed & " ms; it must not wait on a network")
-  for seat in 0 ..< SeatCount:
-    check(sim.haveOrder[seat], "seat " & $seat & " was left with no order")
-  check(sim.orders[0].source == osFallback,
-    "an LLM seat with no credentials was not marked source: fallback")
-  check(sim.orders[0].job == jobHold and sim.orders[0].gift == 0 and
-        sim.orders[0].consume == cwNever,
-    "an LLM seat with no credentials did not fall back to neutral hold")
-  check(sim.orders[2].source == osScripted,
-    "a scripted seat was mis-marked as a fallback")
-  var sawFallback = false
+  check(not sim.haveOrder[0] and not sim.haveOrder[1],
+    "LLM seats with no credentials must not receive a substituted order")
+  check(sim.haveOrder[2] and sim.orders[2].source == osScripted,
+    "a scripted seat was not given its scripted order")
+  check(engine.roundFailures.len == 2,
+    "expected 2 LLM failures, got " & $engine.roundFailures.len)
+  for failure in engine.roundFailures:
+    check(failure.cause == "no_credentials" and failure.category == "infrastructure",
+      "unexpected failure classification: " & failure.category & "/" & failure.cause)
+  var sawFailure = false
   for record in records:
     let node = parseJson(record)
-    if node{"k"}.getStr() == "fallback":
-      sawFallback = true
+    if node{"k"}.getStr() == "decision_failure":
+      sawFailure = true
       check(node{"cause"}.getStr() == "no_credentials",
-        "the fallback cause is " & node{"cause"}.getStr())
-  check(sawFallback, "no fallback record was produced")
-  # And the resulting orders are legal by the same validator the parser uses.
-  for seat in 0 ..< SeatCount:
-    let order = sim.orders[seat]
-    check(order.gift >= 0 and order.gift <= config.maxBeamsPerRound,
-      "a fallback order's gift is out of range")
-    check(order.target != seat, "a fallback order targeted its own seat")
-  banner "with no credentials LLM seats hold position and scripted seats run normally"
+        "the failure cause is " & node{"cause"}.getStr())
+      check(node{"category"}.getStr() == "infrastructure",
+        "the failure category is " & node{"category"}.getStr())
+  check(sawFailure, "no decision_failure record was produced")
+  # Terminating the sim with erError produces an unscored result with no scores/win.
+  sim.failures.add(engine.roundFailures)
+  sim.finish(erError)
+  let results = sim.resultsJson()
+  check(results{"reason"}.getStr() == "error" and results{"ending"}.getStr() == "error",
+    "failed episode did not report error reason/ending")
+  check(not results{"scored"}.getBool(true), "failed episode must have scored=false")
+  check(not results.hasKey("scores") and not results.hasKey("win"),
+    "failed episode must not emit authoritative scores or win booleans")
+  check(results{"failure_cause"}.getStr() == "no_credentials",
+    "results.failure_cause mismatch")
+  check(results{"failure_category"}.getStr() == "infrastructure",
+    "results.failure_category mismatch")
+  banner "with no credentials LLM seats fail cleanly with no fake moves and unscored results"
 
-block repairMissingOrdersUsesHoldForLlmAndExternal:
-  var config = defaultGameConfig()
-  var sim = initSimServer(config)
-  var engine = initDecisionEngine(sim, PromptSelection())
-  engine.seats[0].isLlm = true
-  engine.seats[1].isExternal = true
-  for seat in 0 ..< SeatCount:
-    sim.haveOrder[seat] = false
-  engine.repairMissingOrders(sim)
-  for seat in 0 ..< SeatCount:
-    check(sim.haveOrder[seat], "seat " & $seat & " still has no order")
-    check(sim.orders[seat].source == osFallback,
-      "a repaired order is not marked as a fallback")
-  check(sim.orders[0].job == jobHold and sim.orders[0].consume == cwNever,
-    "missing LLM order did not use neutral hold")
-  check(sim.orders[1].job == jobHold and sim.orders[1].consume == cwNever,
-    "missing external order did not use neutral hold")
-  banner "missing LLM/external orders use neutral hold; unregistered scripted seats use reciprocator"
+block classifyErrorDistinguishesInfraFromInvalidAction:
+  let transportTimeout = classifyDecisionError(
+    newException(LlmError, "llm transport: Operation timed out"), "Operation timed out")
+  check(transportTimeout.cause == "timeout" and transportTimeout.category == "infrastructure",
+    "transport timeout was misclassified")
+  let transportOther = classifyDecisionError(
+    newException(LlmError, "llm transport: connection refused"), "connection refused")
+  check(transportOther.cause == "transport_error" and transportOther.category == "infrastructure",
+    "transport error was misclassified")
+  let throttleErr = classifyDecisionError(
+    newException(LlmError, "llm throttled (429): slow down"), "")
+  check(throttleErr.cause == "throttled" and throttleErr.category == "infrastructure",
+    "429 throttle was misclassified")
+  let authErr = classifyDecisionError(
+    newException(LlmError, "llm auth failed (401) at x: bad key"), "")
+  check(authErr.cause == "auth_error" and authErr.category == "infrastructure",
+    "401 auth error was misclassified")
+  let parseErr = classifyDecisionError(
+    newException(OrderError, "reply must be one JSON object: hello"), "")
+  check(parseErr.cause == "parse_error" and parseErr.category == "invalid_action",
+    "parse error was misclassified")
+  let invalidErr = classifyDecisionError(
+    newException(OrderError, "unknown job dance (expected collect|meet|hold|evade)"), "")
+  check(invalidErr.cause == "invalid_action" and invalidErr.category == "invalid_action",
+    "invalid action was misclassified")
+  banner "classifyDecisionError distinguishes infrastructure failures from model invalid_action/parse_error"
 
 block parseBaselineRejectsAliasesAndUnknowns:
   check(parseBaseline("") == blReciprocator, "empty baseline did not default to reciprocator")
