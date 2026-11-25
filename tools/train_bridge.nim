@@ -165,14 +165,15 @@ when isMainModule:
           "gift": order.gift, "consume": $order.consume})}
     of "step":
       doAssert not game.finished and request["decision_id"].getInt() == id
-      let action = parseJson(request["response"].getStr())
+      let action =
+        if textMode: extractJsonObject(request["response"].getStr())
+        else: parseJson(request["response"].getStr())
       var completion = copy(action)
       if not textMode:
         completion["say"] = %""
         completion["notes"] = %""
       var parsed = parseOrder(completion, seat, game.aliases,
         game.config.maxBeamsPerRound)
-      if not textMode: doAssert not parsed.clamped
       if not textMode and parsed.gift == 0 and parsed.job != jobMeet:
         parsed.target = -1
       parsed.source = osScripted

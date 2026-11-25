@@ -452,29 +452,38 @@ def run_case(
                 k: v for k, v in record["request"].items() if k in decoder_keys
             }
             if mode in {"normalized", "clamped", "truncated", "unknown"}:
-                assert not attempt["accepted"] and attempt["parsed_action"] == action
+                assert not attempt["accepted"] and attempt["parsed_action"] is None
                 assert (
-                    row["action_status"] == "rejected"
+                    row["action_status"] == "fallback"
                     and row["selected_attempt_id"] is None
+                    and row["fallback_origin"] == "engine-hold"
                 )
-                assert "changed a supplied JSON" in attempt["rejection_reason"]
-                assert (
-                    native["source"] == "llm"
-                )  # gameplay still applies its ordinary native parser
+                assert attempt["rejection_reason"]
+                assert native["source"] == "fallback" and native["job"] == "hold"
                 exclusions += 1
             elif attempt["accepted"]:
                 assert attempt["parsed_action"] == action
         if seat:
             assert not row["attempts"] and row["selected_attempt_id"] is None
-    assert len(seen) == len(records) == (24 if mode == "retry" else 12)
+    expected_calls = (
+        24
+        if mode in {"retry", "normalized", "clamped", "truncated", "unknown"}
+        else 12
+    )
+    assert len(seen) == len(records) == expected_calls
     selected = [r for r in rows[:-1] if r["selected_attempt_id"]]
     assert len(selected) == (
         0
         if mode in {"throttle", "normalized", "clamped", "truncated", "unknown"}
         else 12
     )
-    if mode == "throttle":
+    if mode in {"throttle", "normalized", "clamped", "truncated", "unknown"}:
         assert sum(r["action_status"] == "fallback" for r in rows[:-1]) == 12
+        assert all(
+            r["fallback_origin"] == "engine-hold" and r["executed_action"]["job"] == "hold"
+            for r in rows[:-1]
+            if r["action_status"] == "fallback"
+        )
     return {
         "mode": mode,
         "variant": variant,

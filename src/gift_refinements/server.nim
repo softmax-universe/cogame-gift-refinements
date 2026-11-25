@@ -17,7 +17,7 @@
 ##
 ## The player protocol is `gift-refinements.player.v2`, JSON text frames.
 
-import ./prompts, ./training_capture
+import ./prompts, ./training_capture, ./decision_trajectory
 
 import
   std/[json, locks, monotimes, options, os, sets, strutils, tables, times]
@@ -224,13 +224,17 @@ proc websocketHandler(
           appState.pendingRegistrations.add((slot,
             payload{"prompt"}.getStr(), payload{"scripted"}.getStr(), false, websocket))
         of "register":
-          if payload["control"].getStr() != "external":
+          if payload{"control"}.getStr() != "external":
             return
           appState.pendingRegistrations.add((slot, "", "", true, websocket))
         of "action":
-          if payload["id"].getInt() == appState.decisionId and
+          let idNode = payload{"id"}
+          let actionNode = payload{"action"}
+          if not idNode.isNil and idNode.kind == JInt and
+              idNode.getInt() == appState.decisionId and
               appState.pendingActions[slot].isNil:
-            appState.pendingActions[slot] = payload["action"]
+            appState.pendingActions[slot] =
+              if actionNode.isNil: newJNull() else: actionNode
         else:
           echo "gift-refinements: seat ", slot, " sent an unknown frame kind"
   of ErrorEvent, CloseEvent:
@@ -361,8 +365,14 @@ proc drainRegistrations(engine: var DecisionEngine): int =
           engine.seats[item.slot].label = "prompt"
           engine.seats[item.slot].baseline = blReciprocator
         else:
+          try:
+            engine.seats[item.slot].baseline = parseBaseline(item.scripted)
+          except ValueError as error:
+            engine.seats[item.slot].registered = false
+            echo "gift-refinements: seat ", item.slot, " rejected registration: ",
+              error.msg
+            continue
           engine.seats[item.slot].isLlm = false
-          engine.seats[item.slot].baseline = parseBaseline(item.scripted)
           engine.seats[item.slot].label = $engine.seats[item.slot].baseline
         echo registerRecord(item.slot, engine.seats[item.slot].label,
           engine.policyKind(item.slot),
@@ -495,6 +505,7 @@ proc runEpisode*(
           withLock appState.lock:
             for slot in seated:
               if engine.seats[slot].isExternal and
+                  slot in appState.slotSockets and
                   appState.pendingActions[slot].isNil:
                 ready = false
         if ready:
@@ -506,12 +517,37 @@ proc runEpisode*(
           {.gcsafe.}:
             withLock appState.lock:
               action = appState.pendingActions[slot]
-          if not action.isNil:
-            var order = parseOrder(action, slot, sim.aliases,
-              sim.config.maxBeamsPerRound)
-            order.source = osExternal
-            order.latencyMs = (getMonoTime() - decisionStart).inMilliseconds.int
-            sim.installOrder(slot, order)
+          if action.isNil:
+            sim.installOrder(slot, holdFallbackOrder())
+            engine.fallbacks += 1
+            let detail = "external seat provided no action; holding position"
+            echo "gift-refinements: ", fallbackRecord(
+              roundIndex, slot, 1, "timeout", detail)
+            sendSeat(slot, %*{
+              "type": "error", "id": decisionId,
+              "reason": "timeout", "detail": detail})
+            if engine.captureEnabled:
+              engine.decisions[slot].status = asFallback
+          else:
+            try:
+              var order = parseOrder(action, slot, sim.aliases,
+                sim.config.maxBeamsPerRound)
+              order.source = osExternal
+              order.latencyMs = (getMonoTime() - decisionStart).inMilliseconds.int
+              sim.installOrder(slot, order)
+              if engine.captureEnabled:
+                engine.decisions[slot].status = asMissing
+            except OrderError as error:
+              sim.installOrder(slot, holdFallbackOrder())
+              engine.fallbacks += 1
+              echo "gift-refinements: ", fallbackRecord(
+                roundIndex, slot, 1, "invalid_action", error.msg)
+              sendSeat(slot, %*{
+                "type": "error", "id": decisionId,
+                "reason": "invalid_action", "detail": error.msg})
+              if engine.captureEnabled:
+                engine.decisions[slot].status = asFallback
+      engine.repairMissingOrders(sim)
       let elapsed = (getMonoTime() - decisionStart).inMilliseconds.int
       if config.minTurnSeconds * 1000 > elapsed:
         sleep(config.minTurnSeconds * 1000 - elapsed)

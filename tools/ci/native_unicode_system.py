@@ -78,8 +78,10 @@ def verify(output, calls, expect):
             assert attempt["response_body_b64"] == call["response_b64"]
     assert forensic == 7
     assert (
-        decisions[4]["action_status"] == "rejected"
-        and decisions[4]["selected_attempt_id"] is None
+        decisions[4]["action_status"] == "accepted"
+        and len(decisions[4]["attempts"]) == 2
+        and not decisions[4]["attempts"][0]["accepted"]
+        and decisions[4]["attempts"][1]["accepted"]
     )
     missing = decisions[11]["attempts"][0]
     assert (
@@ -127,7 +129,7 @@ def verify_grammar(output, calls, expect):
                 call for call in calls if call["call_id"] == attempt["platform_call_id"]
             )
             assert attempt["response_body_b64"] == call["response_b64"]
-    for index in (0, 1, 2, 3, 6, 11):
+    for index in (0, 1, 2, 3, 6):
         row = decisions[index]
         if expect == "original":
             assert (
@@ -139,18 +141,14 @@ def verify_grammar(output, calls, expect):
                 row["action_status"] == "rejected"
                 and row["selected_attempt_id"] is None
             )
-    for index in (4, 5, 7, 9, 10):
+    for index in (4, 5, 7, 8, 9, 10, 11):
         assert decisions[index]["action_status"] == "accepted"
-    assert decisions[8]["action_status"] == "rejected"
-    for index in (7, 9, 10):
+    for index in (7, 8, 9, 10, 11):
         assert len(decisions[index]["attempts"]) == 2
         assert not decisions[index]["attempts"][0]["accepted"]
         assert decisions[index]["attempts"][1]["accepted"]
-    assert (
-        decisions[1]["executed_action"]["job"]
-        == decisions[11]["executed_action"]["job"]
-        == "hold"
-    )
+    assert decisions[1]["executed_action"]["job"] == "hold"
+    assert decisions[11]["executed_action"]["job"] == "collect"
     return {
         "grammar_native_actions_unchanged": True,
         "strict_gate_expected": expect == "guarded",

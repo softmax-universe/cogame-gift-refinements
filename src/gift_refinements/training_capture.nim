@@ -74,9 +74,16 @@ proc finishRound*(capture: MatchCapture, sim: SimServer) =
       if status != asFallback: status = asRejected
       capture.failed = true
       if capture.errors.len < 16: capture.errors.add(detail)
+    let fallbackOrigin =
+      if status != asFallback: none(string)
+      elif sim.orders[seat].job == jobHold and sim.orders[seat].gift == 0 and
+          sim.orders[seat].consume == cwNever:
+        some("engine-hold")
+      else:
+        some("engine-reciprocator")
     capture.trajectory.recordDecision($capture.round & "-" & $seat, $seat, observation,
       attempts, selected, actual, status, sim.round >= sim.config.rounds,
-      if status == asFallback: some("engine-reciprocator") else: none(string))
+      fallbackOrigin)
 
 proc finishMatch*(capture: MatchCapture, sim: SimServer, destination: string) =
   let outcome = sim.resultsJson()

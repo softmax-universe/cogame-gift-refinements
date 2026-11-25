@@ -212,37 +212,12 @@ proc strictRawObject(text: string): JsonNode =
     raise newException(ValueError, "one raw JSON object required")
 
 proc strictNativeObject(text: string): JsonNode =
-  ## Select exactly the first span the native extractor can parse, including its fallback.
-  ## A strict rejection of that span must never select a later object instead.
+  ## Parse the single bare or outer-fenced JSON object strictly (RFC 8259 + UTF-8).
   if not scalarUtf8(text): raise newException(ValueError, "non-Unicode native completion")
-  var depth = 0
-  var start = -1
-  var inString, escaped = false
-  for index, character in text:
-    if inString:
-      if escaped: escaped = false
-      elif character == '\\': escaped = true
-      elif character == '"': inString = false
-      continue
-    case character
-    of '"': inString = true
-    of '{':
-      if depth == 0: start = index
-      inc depth
-    of '}':
-      if depth > 0:
-        dec depth
-        if depth == 0 and start >= 0:
-          var native: JsonNode
-          try: native = parseJson(text[start .. index])
-          except CatchableError: start = -1
-          if native != nil: return strictRawObject(text[start .. index])
-    else: discard
-  let first = text.find('{')
-  let last = text.rfind('}')
-  if first < 0 or last <= first: raise newException(ValueError, "no native object span")
-  discard parseJson(text[first .. last])
-  strictRawObject(text[first .. last])
+  let body = stripOuterJsonFence(text)
+  if body.len == 0 or body[0] != '{' or body[^1] != '}':
+    raise newException(ValueError, "no native object span")
+  strictRawObject(body)
 
 proc suppliedFieldsEqual(raw, applied: JsonNode): bool =
   ## Framing is source-supported; field/type/value repairs are separate exclusions.
@@ -518,7 +493,7 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
   lines.add("ROUND " & $view.round & " / " & $view.rounds & "   (tick " &
     $view.tick & " of " & $(view.rounds * view.ticksPerRound) & ")")
   lines.add("")
-  lines.add("YOU  " & view.alias.toUpperAscii() & "  at (" & $view.x & "," &
+  lines.add("YOU  " & view.alias & "  at (" & $view.x & "," &
     $view.y & ")")
   lines.add("  holding: " & $view.tokens[0] & " raw, " & $view.tokens[1] &
     " refined, " & $view.tokens[2] & " super  (" & $view.held & " tokens)")
@@ -531,7 +506,7 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
   lines.add("")
   lines.add("COGS  alias | cell | dist | hittable | score | you gave | gave you | net")
   for peer in view.peers:
-    lines.add("  " & peer.alias.toUpperAscii() & " | (" & $peer.x & "," &
+    lines.add("  " & peer.alias & " | (" & $peer.x & "," &
       $peer.y & ") | " & $peer.dist & " | " &
       (if peer.hittable: "YES " & peer.dir else: "no") & " | " & $peer.score &
       " | " & $peer.youGave & " | " & $peer.gaveYou & " | " & $peer.net)
@@ -550,14 +525,14 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
     lines.add("GIFT LEDGER (whole board, most recent last)")
     for row in view.ledgerTail:
       lines.add("  r" & $row.r & "  " &
-        scene.names[row.fromSeat].toUpperAscii() & " \u2192 " &
-        scene.names[row.toSeat].toUpperAscii() & "  " & LevelNames[row.sent] &
+        scene.names[row.fromSeat] & " \u2192 " &
+        scene.names[row.toSeat] & "  " & LevelNames[row.sent] &
         " \u2192 " & $row.n & " " & LevelNames[row.got])
   lines.add("")
   if view.bankTail.len > 0:
     lines.add("BANK TAPE")
     for row in view.bankTail:
-      lines.add("  r" & $row.r & "  " & scene.names[row.seat].toUpperAscii() &
+      lines.add("  r" & $row.r & "  " & scene.names[row.seat] &
         " banked " & $row.n)
     lines.add("")
   if view.history.len > 0:
@@ -606,9 +581,10 @@ proc registerRecord*(seat: int, policy, kind, baseline: string): string =
 #  The turn
 # ---------------------------------------------------------------------------
 
-const RetryHint = "\n\nYour previous reply was invalid. Respond with ONLY the " &
+proc retryHint*(maxBeams: int): string =
+  "\n\nYour previous reply was invalid. Respond with ONLY the " &
   "requested JSON object, using one of the listed job values, one of the " &
-  "listed target aliases, a gift count between 0 and 10, and one of " &
+  "listed target aliases, a gift count between 0 and " & $maxBeams & ", and one of " &
   "now/end/never."
 
 proc scriptedFor*(
@@ -617,17 +593,19 @@ proc scriptedFor*(
   scriptedOrder(kind, sim.seatView(seat), sim.config.maxBeamsPerRound)
 
 proc holdFallbackOrder*(): Order =
-  ## Neutral hold order for scored LLM failures (never runs `reciprocatorOrder`).
+  ## Neutral hold order for LLM/external failures (never runs `reciprocatorOrder`).
   Order(job: jobHold, target: -1, gift: 0, consume: cwNever, source: osFallback)
 
 proc repairMissingOrders*(engine: DecisionEngine, sim: var SimServer) =
-  ## Ensure every seat has an order: neutral hold for LLM seats, `reciprocator`
-  ## for unregistered scripted seats.
+  ## Ensure every seat has an order: neutral hold for LLM/external seats,
+  ## `reciprocator` only for unregistered scripted seats.
   for seat in 0 ..< SeatCount:
     if not sim.haveOrder[seat]:
       var order =
-        if engine.seats[seat].isLlm: holdFallbackOrder()
-        else: reciprocatorOrder(sim.seatView(seat), sim.config.maxBeamsPerRound)
+        if engine.seats[seat].isLlm or engine.seats[seat].isExternal:
+          holdFallbackOrder()
+        else:
+          reciprocatorOrder(sim.seatView(seat), sim.config.maxBeamsPerRound)
       order.source = osFallback
       sim.orders[seat] = order
       sim.haveOrder[seat] = true
@@ -674,7 +652,9 @@ proc turn*(
   # --- which seats need a call? --------------------------------------------
   var open: seq[int] = @[]
   for seat in 0 ..< SeatCount:
-    if engine.seats[seat].isLlm and not engine.llmOff and
+    if engine.seats[seat].isExternal:
+      sim.haveOrder[seat] = false
+    elif engine.seats[seat].isLlm and not engine.llmOff and
         not engine.client.disabled:
       open.add(seat)
     elif engine.seats[seat].isLlm:
@@ -729,7 +709,7 @@ proc turn*(
       let view = sim.seatView(seat)
       var user = userPrompt(view, scene, engine.seats[seat].prompt)
       if attempt > 0:
-        user.add(RetryHint)
+        user.add(retryHint(sim.config.maxBeamsPerRound))
       let request = engine.client.requestFor(systemPrompt(view, scene, engine.selection), user, seat)
       batch.post(request.url, request.headers, request.body, $seat)
       if engine.captureEnabled:

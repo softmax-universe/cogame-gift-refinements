@@ -22,21 +22,31 @@ suite "llm"
 
 let aliases = @Aliases
 
-block extractsFencedAndProsePrefixedReplies:
-  let fenced = "Sure! Here you go:\n```json\n" &
-    "{\"job\":\"meet\",\"target\":\"Aro\",\"gift\":2}\n```\nHope that helps."
-  let node = extractJsonObject(fenced)
-  check(node{"job"}.getStr() == "meet", "the fenced object was not recovered")
-  let prose = "I think Cyr should hold. {\"job\":\"hold\",\"gift\":0} Done."
-  check(extractJsonObject(prose){"job"}.getStr() == "hold",
-    "the prose-wrapped object was not recovered")
-  var raised = false
-  try:
-    discard extractJsonObject("no object here at all")
-  except OrderError:
-    raised = true
-  check(raised, "a reply with no object did not raise")
-  banner "extractJsonObject tolerates fences and prose on both sides"
+block extractsBareAndSingleFencedObjectsOnly:
+  let bare = """{"job":"hold","gift":0}"""
+  check(extractJsonObject(bare){"job"}.getStr() == "hold",
+    "a bare JSON object was not parsed")
+  let fencedJson = "```json\n{\"job\":\"meet\",\"target\":\"Aro\",\"gift\":2}\n```"
+  check(extractJsonObject(fencedJson){"job"}.getStr() == "meet",
+    "a single ```json fenced object was not parsed")
+  let fencedPlain = "```\n{\"job\":\"evade\"}\n```"
+  check(extractJsonObject(fencedPlain){"job"}.getStr() == "evade",
+    "a single plain ``` fenced object was not parsed")
+  for bad in [
+    "Sure! Here you go:\n```json\n{\"job\":\"meet\",\"target\":\"Aro\",\"gift\":2}\n```\nHope that helps.",
+    "I think Cyr should hold. {\"job\":\"hold\",\"gift\":0} Done.",
+    "{\"job\":\"hold\"} {\"job\":\"collect\"}",
+    "```json\n{\"job\":\"hold\"}\n```\n```json\n{\"job\":\"collect\"}\n```",
+    "```python\n{\"job\":\"hold\"}\n```",
+    "no object here at all"
+  ]:
+    var raised = false
+    try:
+      discard extractJsonObject(bad)
+    except OrderError:
+      raised = true
+    check(raised, "ambiguous or prose-wrapped reply was accepted: " & bad)
+  banner "extractJsonObject accepts one bare or outer-fenced object and rejects prose/extra objects"
 
 proc parses(payload: string, seat = 2): Order =
   parseOrder(extractJsonObject(payload), seat, aliases, DefaultMaxBeamsPerRound)
@@ -63,31 +73,56 @@ block schemaRejects:
   rejects("""{"job":"meet","target":null,"gift":0}""",
     "job meet with a null target was accepted")
   rejects("""{"job":"collect","gift":"lots"}""", "a non-integer gift was accepted")
+  rejects("""{"job":"collect","gift":"2","target":"Aro"}""",
+    "a string-encoded gift was accepted")
+  rejects("""{"job":"collect","gift":1.0,"target":"Aro"}""",
+    "a float-encoded gift was accepted")
   rejects("""{"job":"collect","gift":1.5,"target":"Aro"}""",
     "a fractional gift was accepted")
+  rejects("""{"job":"meet","target":"Aro","gift":40}""",
+    "an out-of-range gift > maxBeams was accepted")
+  rejects("""{"job":"hold","gift":-1}""",
+    "a negative gift was accepted")
   rejects("""{"job":"hold","consume":"maybe"}""", "an unknown consume was accepted")
-  banner "every invalid-reply row in the design note's table raises"
+  rejects("""{"job":"MEET","target":"Aro","gift":1}""",
+    "a non-canonical job case was accepted")
+  rejects("""{"job":" HOLD "}""", "a whitespace-padded job was accepted")
+  rejects("""{"job":"meet","target":"aRo","gift":1}""",
+    "a non-canonical alias case was accepted")
+  rejects("""{"job":"hold","consume":"NEVER"}""",
+    "a non-canonical consume case was accepted")
+  rejects("""{"job":"hold","unknown_field":1}""",
+    "an unexpected top-level field was accepted")
+  rejects("""{"job":"hold","say":123}""",
+    "a non-string say was accepted")
+  rejects("""{"job":"hold","notes":[]}""",
+    "a non-string notes was accepted")
+  rejects("""{"job":"hold","say":"""" & "x".repeat(MaxSayRunes + 1) & """"}""",
+    "an over-length say was accepted")
+  rejects("""{"job":"hold","notes":"""" & "y".repeat(MaxNotesRunes + 1) & """"}""",
+    "an over-length notes was accepted")
+  banner "every invalid, coerced, out-of-range, legacy, or extra-field reply raises"
 
-block schemaRepairs:
-  let clamped = parses("""{"job":"meet","target":"Aro","gift":40}""")
-  check(clamped.gift == DefaultMaxBeamsPerRound,
-    "gift 40 clamped to " & $clamped.gift)
-  check(clamped.clamped, "the clamp was not recorded on the order")
+block schemaValidDefaultsAndExactFields:
   let zero = parses("""{"job":"meet","target":"Aro","gift":0}""")
   check(zero.gift == 0 and zero.target == 0 and not zero.clamped,
     "gift 0 with job meet and a valid target must be legal and unclamped")
   let defaults = parses("""{"job":"collect"}""")
   check(defaults.gift == 0, "an absent gift did not default to 0")
   check(defaults.consume == cwEnd, "an absent consume did not default to end")
-  let caseless = parses("""{"job":"MEET","target":"aRo","consume":"NEVER","gift":1}""")
-  check(caseless.job == jobMeet and caseless.target == 0 and
-        caseless.consume == cwNever,
-    "the parser is not case-insensitive on the enums and aliases")
-  let capped = parses("""{"job":"hold","say":"` & """ &
-    "x".repeat(400) & """`","notes":"` & """ & "y".repeat(900) & """`"}""")
-  check(capped.say.len <= MaxSayRunes + 4, "say was not truncated")
-  check(capped.notes.len <= MaxNotesRunes + 4, "notes was not truncated")
-  banner "gift clamps and flags, absent fields default, strings truncate"
+  check(defaults.target == -1, "an absent target did not default to -1")
+  check(defaults.say == "" and defaults.notes == "",
+    "absent say/notes did not default to empty strings")
+  let exact = parses("""{"job":"meet","target":"Aro","consume":"never","gift":1,"say":"hi","notes":"ok"}""")
+  check(exact.job == jobMeet and exact.target == 0 and
+        exact.consume == cwNever and exact.gift == 1 and
+        exact.say == "hi" and exact.notes == "ok",
+    "a complete exact order did not parse cleanly")
+  let exactMax = parses("""{"job":"hold","say":"""" & "x".repeat(MaxSayRunes) &
+    """","notes":"""" & "y".repeat(MaxNotesRunes) & """"}""")
+  check(exactMax.say.len == MaxSayRunes and exactMax.notes.len == MaxNotesRunes,
+    "exact max-length say/notes were modified")
+  banner "genuine optional defaults and exact valid orders parse cleanly"
 
 block maxTokensIsNamed:
   ## hanabi, 2026-08-24: a truncated reply used to surface as the misleading
@@ -263,6 +298,9 @@ block offlineTurnFallsBackWithoutRaising:
     check(sim.haveOrder[seat], "seat " & $seat & " was left with no order")
   check(sim.orders[0].source == osFallback,
     "an LLM seat with no credentials was not marked source: fallback")
+  check(sim.orders[0].job == jobHold and sim.orders[0].gift == 0 and
+        sim.orders[0].consume == cwNever,
+    "an LLM seat with no credentials did not fall back to neutral hold")
   check(sim.orders[2].source == osScripted,
     "a scripted seat was mis-marked as a fallback")
   var sawFallback = false
@@ -279,12 +317,14 @@ block offlineTurnFallsBackWithoutRaising:
     check(order.gift >= 0 and order.gift <= config.maxBeamsPerRound,
       "a fallback order's gift is out of range")
     check(order.target != seat, "a fallback order targeted its own seat")
-  banner "with no credentials every seat gets a legal reciprocator order, fast"
+  banner "with no credentials LLM seats hold position and scripted seats run normally"
 
-block repairMissingOrdersLeavesNoTickUnactuated:
+block repairMissingOrdersUsesHoldForLlmAndExternal:
   var config = defaultGameConfig()
   var sim = initSimServer(config)
   var engine = initDecisionEngine(sim, PromptSelection())
+  engine.seats[0].isLlm = true
+  engine.seats[1].isExternal = true
   for seat in 0 ..< SeatCount:
     sim.haveOrder[seat] = false
   engine.repairMissingOrders(sim)
@@ -292,7 +332,24 @@ block repairMissingOrdersLeavesNoTickUnactuated:
     check(sim.haveOrder[seat], "seat " & $seat & " still has no order")
     check(sim.orders[seat].source == osFallback,
       "a repaired order is not marked as a fallback")
-  banner "a seat with no order at all plays the reciprocator order"
+  check(sim.orders[0].job == jobHold and sim.orders[0].consume == cwNever,
+    "missing LLM order did not use neutral hold")
+  check(sim.orders[1].job == jobHold and sim.orders[1].consume == cwNever,
+    "missing external order did not use neutral hold")
+  banner "missing LLM/external orders use neutral hold; unregistered scripted seats use reciprocator"
+
+block parseBaselineRejectsAliasesAndUnknowns:
+  check(parseBaseline("") == blReciprocator, "empty baseline did not default to reciprocator")
+  check(parseBaseline("reciprocator") == blReciprocator, "reciprocator did not parse")
+  check(parseBaseline("hoarder") == blHoarder, "hoarder did not parse")
+  for bad in ["hoard", "HOARDER", "leech", "unknown"]:
+    var raised = false
+    try:
+      discard parseBaseline(bad)
+    except ValueError:
+      raised = true
+    check(raised, "legacy or unknown baseline was accepted: " & bad)
+  banner "parseBaseline accepts only empty/reciprocator/hoarder"
 
 block promptsCarryTheContract:
   let sim = initSimServer(defaultGameConfig())

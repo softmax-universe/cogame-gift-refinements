@@ -100,24 +100,14 @@ def play(
                 action.update(
                     say=f"SPECTATOR-SPEECH-{seat}", notes=f"PRIVATE-SEAT-{seat}"
                 )
-                if index == 0:
-                    action.update(
-                        job=" HOLD ",
-                        target=view["cogs"][0]["alias"].upper(),
-                        gift="100",
-                        consume=" NEVER ",
-                    )
+            response_text = json.dumps(action)
+            if private and index == 0:
+                response_text = "```json\n" + response_text + "\n```"
             result = request(
-                {"kind": "step", "decision_id": index, "response": json.dumps(action)}
+                {"kind": "step", "decision_id": index, "response": response_text}
             )
             assert result["kind"] == "accepted"
-            if private and index == 0:
-                assert (
-                    result["action"]["job"] == "hold" and result["action"]["gift"] == 10
-                )
-                assert result["action"]["consume"] == "never"
-            else:
-                assert result["action"] == action
+            assert result["action"] == action
             trace.append((view, user, result["action"]))
             observation = result["observation"]
         assert len(trace) == 72 and len(observation["scores"]) == 6

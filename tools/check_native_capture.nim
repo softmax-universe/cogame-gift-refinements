@@ -67,7 +67,7 @@ for round in 1 .. config.rounds:
     for attempt in row["attempts"]:
       var user = userPrompt(game.seatView(seat), game.scene(), args[3])
       if attempt["attempt_id"].getStr().endsWith("-2"):
-        user.add("\n\nYour previous reply was invalid. Respond with ONLY the requested JSON object, using one of the listed job values, one of the listed target aliases, a gift count between 0 and 10, and one of now/end/never.")
+        user.add(retryHint(config.maxBeamsPerRound))
       doAssert attempt["request"]["system"].getStr() == system
       doAssert attempt["request"]["messages"] == %*[{"role": "user", "content": user}]
       doAssert attempt["request"]["max_tokens"].getInt() == config.maxOutputTokens
@@ -81,9 +81,10 @@ for round in 1 .. config.rounds:
       order = parseOrder(extractJsonObject(selected["response"].getStr()), seat,
         game.aliases, config.maxBeamsPerRound)
       order.source = if selected["attempt_id"].getStr().endsWith("-2"): osRetry else: osLlm
+    elif row["action_status"].getStr() == "fallback":
+      order = holdFallbackOrder()
     else:
       order = scriptedOrder(blReciprocator, game.seatView(seat), config.maxBeamsPerRound)
-      if row["action_status"].getStr() == "fallback": order.source = osFallback
     doAssert order.orderJson(game.aliases) == row["executed_action"]
     game.orders[seat] = order
     game.haveOrder[seat] = true

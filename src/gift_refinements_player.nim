@@ -44,6 +44,11 @@ when isMainModule:
   let
     prompt = getEnv("PLAYER_PROMPT").strip()
     scripted = getEnv("PLAYER_SCRIPTED").strip()
+  if prompt.len == 0 and scripted.len > 0 and
+      scripted notin ["reciprocator", "hoarder"]:
+    quit("unknown PLAYER_SCRIPTED baseline: " & scripted &
+      " (expected reciprocator|hoarder)", 1)
+  let
     label = block:
       let explicit = getEnv("PLAYER_POLICY_LABEL").strip()
       if explicit.len > 0: explicit

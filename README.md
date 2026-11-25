@@ -39,8 +39,9 @@ coworld upload-policy coworld-gift-refinements:latest \
 that sets neither plays `reciprocator`.
 
 External players receive seat-private observations and submit ordinary collect,
-hold, evade, meet, and gift orders. The game validates them through its normal
-action path and uses `reciprocator` when an action is missing or invalid.
+hold, evade, meet, and gift orders. The game validates them strictly through its
+normal action path; missing or invalid external actions receive an `error` frame
+and hold position (no-op) for that round.
 
 Once per round (60 ticks), the game sends external policies their seat-private
 observations and accepts ordinary standing orders. Prompt seats still share
@@ -76,7 +77,7 @@ replay, and is never delivered to another seat.
 | `src/gift_refinements/sim.nim`        | the tick loop and the seven numbered steps                                                    |
 | `src/gift_refinements/ledger.nim`     | the public gift ledger, the `net` matrix, the defection rule                                  |
 | `src/gift_refinements/kernel.nim`     | one standing order in, sixty per-tick grid actions out                                        |
-| `src/gift_refinements/orders.nim`     | the order schema and the tolerant parser                                                      |
+| `src/gift_refinements/orders.nim`     | the order schema and strict parser                                                            |
 | `src/gift_refinements/scripted.nim`   | `reciprocator`, `hoarder` (+ a test-only `leech`)                                             |
 | `src/gift_refinements/llm.nim`        | the Bedrock/Anthropic transport, haiku-only                                                   |
 | `src/gift_refinements/decide.nim`     | the batched round, the retry batch, the fallback                                              |

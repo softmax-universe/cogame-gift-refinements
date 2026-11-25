@@ -40,12 +40,14 @@ type
       ## no manifest player or policy names it.
 
 proc parseBaseline*(text: string): Baseline =
-  ## PLAYER_SCRIPTED values. Anything unrecognised is `reciprocator`: a seat
-  ## that says nothing useful still plays the published default rather than
-  ## sitting out. `leech` is deliberately NOT reachable from here.
-  case text.strip().toLowerAscii()
-  of "hoarder", "hoard": blHoarder
-  else: blReciprocator
+  ## PLAYER_SCRIPTED values. Empty defaults to `reciprocator`; any other
+  ## unrecognised name raises ValueError. `leech` is test-only and rejected here.
+  case text
+  of "", "reciprocator": blReciprocator
+  of "hoarder": blHoarder
+  else:
+    raise newException(ValueError,
+      "unknown scripted baseline: " & text & " (expected reciprocator|hoarder)")
 
 proc seedTarget(view: SeatView): int =
   ## Who to open with. The NEAREST cog you have not already opened with -- and
