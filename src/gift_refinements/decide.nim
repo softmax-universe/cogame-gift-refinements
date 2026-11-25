@@ -457,22 +457,23 @@ pillars and other cogs. A beam that finds nobody costs you nothing.
       "split the pile, eight beams and nine points total. Cooperation: optional at every step; holder " &
       "may consume and depart behind a pillar.\n\n")
   of pvMixed: raise newException(ValueError, "mixed selection must resolve to a training wording")
+  let exampleTarget =
+    if view.peers.len > 0: view.peers[0].alias else: Aliases[0]
   result.add("""THE CLOSE. At the last tick of round """ & $scene.rounds & """, everything you still hold is banked automatically.
 
-HOW YOU PLAY. Once per round you choose ONE standing order for the next """ & $scene.ticksPerRound & """ ticks:
-  "job"     - movement only: "collect" (nearest loose raw token), "meet" (move into beam line of `target` and wait), "hold" (stay put), or "evade" (move away from all cogs). Never set "job" to "consume".
-  "target"  - another cog's alias or null. Required (non-null) whenever "job" is "meet" or "gift" > 0.
-  "gift"    - integer 0..""" & $scene.maxBeamsPerRound & """: max beams to fire at `target` this round whenever it is in line.
-  "consume" - banking only (separate from "job"): "now" (first tick), "end" (last tick), or "never".
+HOW YOU PLAY. Once per round choose ONE standing order for the next """ & $scene.ticksPerRound & """ ticks:
+  "job"     - movement: "collect" (nearest loose raw), "meet" (align in beam line of `target`), "hold" (stay put), or "evade" (move away). Never set "job" to "consume".
+  "target"  - another cog's alias; required whenever "job" is "meet" or "gift" > 0, omit otherwise.
+  "gift"    - optional integer 0..""" & $scene.maxBeamsPerRound & """ (default 0): max beams to fire at `target` when in line.
+  "consume" - optional banking ("now" first tick, "end" last tick, "never"; default "end").
+  "say" / "notes" - optional strings (say <= """ & $MaxSayRunes & """ spectators only; notes <= """ & $MaxNotesRunes & """ private to you).
+Examples:
+  Meet/gift: {"job":"meet","target":"""" & exampleTarget & """","gift":3,"consume":"never"}
+  Collect/bank: {"job":"collect","consume":"end"}
 
-THE OTHER FIVE. """ & others.join(", ") & """ are other policies, deciding at the SAME
-moment you are. NOBODY CAN HEAR ANYTHING YOU SAY - there is no talk channel in this world. The
-only signals you can send are a beam and where you choose to stand. Your `notes` field is
-private to you and comes back to you next round; nobody else ever sees it.
+THE OTHER FIVE. """ & others.join(", ") & """ decide at the SAME moment you do. NOBODY CAN HEAR ANYTHING YOU SAY - there is no talk channel; only beams and position signal anything.
 
-OUTPUT FORMAT: reply with ONLY one JSON object, nothing else - no analysis, no explanation, no
-markdown fences, no text before or after the object. Your reply must begin with the character {
-and end with }.""")
+OUTPUT FORMAT: reply with ONLY one JSON object - no prose, no markdown fences. Your reply must begin with the character { and end with }.""")
 
 
 proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
@@ -538,15 +539,14 @@ proc userPrompt*(view: SeatView, scene: Scene, operatorPrompt: string): string =
   var aliasList: seq[string] = @[]
   for peer in view.peers:
     aliasList.add("\"" & peer.alias & "\"")
+  let exampleTarget =
+    if view.peers.len > 0: view.peers[0].alias else: Aliases[0]
   result = lines.join("\n") & "\n\n" & operatorBlock(operatorPrompt) &
-    "Reply with ONE JSON object: {\"job\":\"collect|meet|hold|evade\"," &
-    "\"target\":" & aliasList.join("|") & "|null," &
-    "\"gift\":0-" & $view.beamsPerRound & "," &
-    "\"consume\":\"now|end|never\"," &
-    "\"say\":\"<= " & $MaxSayRunes & " chars, spectators only\"," &
-    "\"notes\":\"<= " & $MaxNotesRunes & " chars, private to you\"}\n" &
-    "Rules: \"consume\" is a separate field (never set \"job\" to \"consume\"); " &
-    "\"target\" must be a listed alias (never null) when \"job\" is \"meet\" or \"gift\" > 0."
+    "Reply with ONE JSON object (job: collect|meet|hold|evade; consume: now|end|never; gift: 0-" &
+    $view.beamsPerRound & "; targets: " & aliasList.join("|") & ").\n" &
+    "Examples: {\"job\":\"meet\",\"target\":\"" & exampleTarget & "\",\"gift\":2,\"consume\":\"never\"}" &
+    " or {\"job\":\"collect\",\"consume\":\"end\"}.\n" &
+    "Rules: never set \"job\" to \"consume\"; include a listed \"target\" whenever \"job\" is \"meet\" or \"gift\" > 0 (omit \"target\" otherwise)."
 
 # ---------------------------------------------------------------------------
 #  Fallback + guard records

@@ -19,7 +19,7 @@
 ##   7. Record      append the frame, the events and the tokens-in-play row;
 ##                  on the final tick every cog autobanks BEFORE recording
 
-import std/[json, strutils]
+import std/[json, options, strutils]
 
 import ./sim_types, ./sim_config, ./board, ./events, ./ledger, ./orders
 
@@ -677,6 +677,41 @@ proc resultsJson*(sim: SimServer): JsonNode =
     "reason": $sim.reason,
     "ending": $sim.ending
   }
+
+const
+  MaxPlayerFailureMessageRunes* = 2000
+
+proc playerFailureJson*(sim: SimServer): Option[JsonNode] =
+  ## Canonical Coworld `GamePlayerFailure` payload for a failed episode when
+  ## the failing seat is known. Returns `none` for non-error episodes or when
+  ## no known seat can be attributed (never invents a seat or outcome).
+  if sim.reason != erError or sim.failures.len == 0:
+    return none(JsonNode)
+  let primary = sim.failures[0]
+  if primary.seat < 0 or primary.seat >= sim.config.numAgents:
+    return none(JsonNode)
+  let kind =
+    if primary.category == "invalid_action": "player_error"
+    else: "episode_inconclusive"
+  var parts: seq[string] = @[]
+  if primary.round > 0:
+    parts.add("round " & $primary.round)
+  parts.add("seat " & $primary.seat)
+  if primary.cause.len > 0:
+    parts.add(primary.cause)
+  let prefix = parts.join(" ")
+  let detail = primary.detail.cleanText(MaxPlayerFailureMessageRunes)
+  var message =
+    if detail.len > 0: prefix & ": " & detail
+    else: prefix
+  message = message.cleanText(MaxPlayerFailureMessageRunes)
+  if message.len == 0:
+    message = "episode failed"
+  some(%*{
+    "message": message,
+    "failed_policy_index": primary.seat,
+    "kind": kind
+  })
 
 proc scene*(sim: SimServer): Scene =
   ## The static half of what the renderer needs. Built once by the live server

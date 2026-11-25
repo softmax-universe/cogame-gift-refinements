@@ -641,16 +641,18 @@ proc runEpisode*(
     sendSeat(slot, finalJson(sim, slot))
   broadcastFrame(sim, tracker, newJArray(), over)
   sleep(500)
-  try:
-    writeCogameUri(runtime.resultsUri, $results, "application/json",
-      "COGAME_RESULTS_URI")
-  except CatchableError as error:
-    echo "gift-refinements: results write failed: ", error.msg
-  if sim.reason == erError:
+  if sim.reason != erError:
+    try:
+      writeCogameUri(runtime.resultsUri, $results, "application/json",
+        "COGAME_RESULTS_URI")
+    except CatchableError as error:
+      echo "gift-refinements: results write failed: ", error.msg
+  else:
     let failureUri = getEnv("COGAME_PLAYER_FAILURE_URI").strip()
-    if failureUri.len > 0:
+    let playerFailure = sim.playerFailureJson()
+    if failureUri.len > 0 and playerFailure.isSome:
       try:
-        writeCogameUri(failureUri, $results, "application/json",
+        writeCogameUri(failureUri, $playerFailure.get(), "application/json",
           "COGAME_PLAYER_FAILURE_URI")
       except CatchableError as error:
         echo "gift-refinements: failure artifact write failed: ", error.msg
